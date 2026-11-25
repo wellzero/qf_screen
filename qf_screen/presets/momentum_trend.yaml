@@ -1,0 +1,26 @@
+name: momentum_trend
+description: >
+  The classic price/volume stack on the whole A-share universe: above the
+  200-day mean, positive 6-1 momentum, within 30% of the 52-week high,
+  lower half of volatility, not in the lottery top decile.  Uses the
+  store's rebuilt chain-adjusted close (neither provider's own adjusted
+  series is dependable).
+
+universe:
+  boards: [all]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: trend,     expr: "ma_ratio_200 > 1"}
+  - {name: momentum,  expr: "mom_126s21 > 0"}
+  - {name: near_high, expr: "high252_ratio >= 0.70"}
+  - {name: low_vol,   expr: "pct_rank(vol_60d) <= 0.5"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(mom_126s21)", weight: 1.0}
+  - {expr: "pct_rank(high252_ratio)", weight: 0.5}
+
+top_n: 30

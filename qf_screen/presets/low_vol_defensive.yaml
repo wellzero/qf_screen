@@ -1,0 +1,23 @@
+name: low_vol_defensive
+description: >
+  The low-risk anomaly, defensively tilted: bottom third of 60-day
+  volatility among liquid names, not in the lottery decile, positive
+  earnings (where reported) and not deeply levered; ranked by inverse
+  volatility so the calmest liquid names come first.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: low_vol,    expr: "pct_rank(vol_60d) <= 0.33"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+  - {name: drawdown,   expr: "high252_ratio >= 0.50"}
+  - {name: solvent,    expr: "debt_assets < 0.7", na_pass: true}
+
+rank:
+  - {expr: "1 / vol_60d", weight: 1.0}
+
+top_n: 30

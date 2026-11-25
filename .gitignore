@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# editable-install / build artifacts
+*.egg-info/
+build/
+dist/
+
+# virtual environments
+venv/
+.venv/
+.env
+.env.*
+
+# screen outputs written by `qf-screen ... --out` (default location)
+output/
+out/
+
+# editor / agent scratch
+.claude/
+.aider*
+.vscode/
+.idea/
+.DS_Store

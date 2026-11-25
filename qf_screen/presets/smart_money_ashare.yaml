@@ -1,0 +1,29 @@
+name: smart_money_ashare
+description: >
+  A-share "smart money" confirmation on liquid main+ChiNext names: rising
+  northbound holdings over 20 and 60 days, rising margin balance, analyst
+  coverage that is at least half Buy/Overweight, no pledge overhang, and
+  insiders not net sellers.  The alt features read one lxg/ak file per
+  symbol on first use (the slowest preset); names a source does not cover
+  fail that leg conservatively.
+
+universe:
+  boards: [main, chinext]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 2e8"}
+  - {name: northbound, expr: "nb_hold_chg_20d > 0 and nb_hold_chg_60d > 0"}
+  - {name: margin,     expr: "margin_chg_20d > 0"}
+  - {name: analysts,   expr: "report_cnt_90d >= 3 and buy_report_ratio_90d >= 0.5"}
+  - {name: pledge,     expr: "pledge_ratio < 0.30"}
+  - {name: insiders,   expr: "insider_net_180d_mc > -0.001"}
+  - {name: trend,      expr: "ma_ratio_60 > 1"}
+
+rank:
+  - {expr: "pct_rank(nb_hold_chg_20d)", weight: 1.0}
+  - {expr: "pct_rank(margin_chg_20d)",  weight: 0.5}
+  - {expr: "pct_rank(mom_63s21)",       weight: 0.5}
+
+top_n: 20

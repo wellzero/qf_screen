@@ -1,0 +1,25 @@
+name: quality_growth
+description: >
+  Profitable growers at a reasonable price: TTM revenue and profit growth
+  above 15%, ROE above 12%, margins stable (gross margin above 20%), debt
+  under 60% of assets, P/E under 40 but positive; ranked by growth blended
+  with quality.  Statement fields cover only the lxg finance subset.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: growth,  expr: "rev_growth > 0.15 and profit_growth > 0.15"}
+  - {name: quality, expr: "roe > 0.12 and gross_margin > 0.20"}
+  - {name: balance, expr: "debt_assets < 0.6"}
+  - {name: price,   expr: "pe_ttm > 0 and pe_ttm < 40"}
+
+rank:
+  - {expr: "pct_rank(rev_growth)",   weight: 1.0}
+  - {expr: "pct_rank(profit_growth)", weight: 1.0}
+  - {expr: "pct_rank(roe)",          weight: 0.5}
+
+top_n: 30

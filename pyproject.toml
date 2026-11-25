@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qf-screen"
+version = "0.1.0"
+description = "Chinese A-share stock screener: point-in-time snapshot screening and causal wide-panel schedules over the local lxg/ak store"
+requires-python = ">=3.10"
+# Runtime dependencies are declared as METADATA only.  The environment is the
+# shared /opt/quantfree venv and installs there are deliberately `--no-deps`
+# (the exact versions are frozen by the sibling qf_factor lock).  The sibling
+# packages this project builds on -- quant_free (path/symbol constants) and
+# qf_factor (selection screens, ST band detector, lxg finance bridge) -- are
+# editable installs from the qf_project checkout and are not on PyPI, so they
+# cannot be expressed here; install them first:
+#   pip install -e ../quant_free --no-deps && pip install -e ../qf_factor --no-deps
+dependencies = [
+    "pandas>=2.2,<2.3",
+    "numpy>=2.4,<2.5",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+# `--live` refresh only.  akshare is imported lazily and is never touched in
+# offline mode or by the unit tests (which inject a fake module).
+live = ["akshare>=1.18"]
+
+[project.scripts]
+qf-screen = "qf_screen.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["qf_screen*"]
+exclude = ["test*"]
+
+[tool.setuptools.package-data]
+"qf_screen.presets" = ["*.yaml"]
+
+# Pin the lint contract explicitly (same as the sibling repos): newer ruff
+# releases expand their default rule set, which would make lint results depend
+# on the ruff version instead of the code.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# Markers are registered so an unknown marker is an ERROR rather than a
+# silently-ignored decorator -- a typo'd `@pytest.mark.data` must not quietly
+# turn a data-dependent test into one CI believes is hermetic.
+addopts = "--strict-markers"
+markers = [
+    "unit: hermetic -- no market data, no network (synthetic fixture tree in tmp_path).",
+    "data: requires the real market data under QUANT_DATA_DIR; skipped automatically when absent.",
+    "slow: orthogonal modifier (~5s+). Still unit/data; deselect locally with -m 'unit and not slow'.",
+]
+
+[tool.coverage.run]
+source = ["qf_screen"]
+branch = true

@@ -1,0 +1,25 @@
+name: value_dividend
+description: >
+  Cheap, profitable, low-levered payers on the main boards: positive P/E
+  under 15, TTM ROE above 12%, liabilities under 60% of assets and a
+  trailing dividend yield of at least 3%, ranked by earnings yield blended
+  with the yield.  Statement fields cover only the lxg finance subset
+  (~765 names) -- watch the funnel.
+
+universe:
+  boards: [main]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: value,    expr: "pe_ttm > 0 and pe_ttm < 15"}
+  - {name: quality,  expr: "roe > 0.12"}
+  - {name: balance,  expr: "debt_assets < 0.6"}
+  - {name: dividend, expr: "div_yield_ttm >= 0.03"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(div_yield_ttm)",  weight: 1.0}
+
+top_n: 30
