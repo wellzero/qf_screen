@@ -115,13 +115,15 @@ class AkProvider:
         self.data_dir = Path(data_dir or get_data_dir())
         self.market = market
         self.root = self.data_dir / market / EQUITY_DIR
+        self._base = f"{self.root}{os.sep}"          # see LxgProvider.find
 
     def find(self, dirs: Sequence[str], filename: str) -> Optional[Path]:
         """First existing ``<dir>/ak/<filename>`` over a symbol's aliases."""
+        base = self._base
         for name in dirs:
-            path = self.root / name / PROVIDER_AK / filename
-            if path.exists():
-                return path
+            path = f"{base}{name}{os.sep}{PROVIDER_AK}{os.sep}{filename}"
+            if os.path.exists(path):
+                return Path(path)
         return None
 
     def read(self, dirs: Sequence[str], name: str, **kw) -> Optional[pd.DataFrame]:

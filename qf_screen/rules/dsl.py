@@ -141,7 +141,21 @@ DSL_FUNCTIONS: Dict[str, Callable] = {
     # numeric constants screens commonly threshold against
     "pi": math.pi,
     "e": math.e,
+    # the qf_factor CSV bridge — NOT a value function: visit_Call compiles
+    # factor("<family>", "<column>") into a dynamic feature lookup
+    # (factor_<family>__<column>), so it needs string-literal arguments
+    "factor": None,
 }
+
+#: dynamic feature prefix the ``factor(...)`` call compiles into
+_FACTOR_PREFIX = "factor_"
+
+
+def factor_feature_name(family: str, column: str) -> str:
+    """``("finance_Q_factor", "roe") -> "factor_finance_Q_factor__roe"``."""
+    if "__" in column:
+        raise DslError(f"factor column {column!r} must not contain '__'")
+    return f"{_FACTOR_PREFIX}{family}__{column}"
 
 
 def allowed_functions() -> Sequence[str]:
@@ -203,6 +217,12 @@ class _Compiler(ast.NodeVisitor):
                 f"panel registry") from None
 
     def visit_Constant(self, node: ast.Constant) -> Callable:
+        if isinstance(node.value, str):
+            # string literals live ONLY in factor("<family>", "<column>")
+            # (handled in _factor_call straight off the AST); a stray text
+            # operand stays a compile-time error
+            self.fail(node, f"string constant {node.value!r} is only valid "
+                            'inside factor("<family>", "<column>")')
         if isinstance(node.value, _NUM_CONST) and not isinstance(node.value, bool):
             return lambda env, v=float(node.value): v
         if isinstance(node.value, bool):
@@ -312,6 +332,8 @@ class _Compiler(ast.NodeVisitor):
                             f"(known: {', '.join(allowed_functions())})")
         if node.keywords:
             self.fail(node, "keyword arguments are not supported")
+        if name == "factor":
+            return self._factor_call(node)
         args = [self.visit(a) for a in node.args]
         # arity check per function (industry_rank may bind _industry itself)
         arity = {"clip": (3,), "fillna": (2,), "minimum": (2,), "maximum": (2,),
@@ -329,6 +351,30 @@ class _Compiler(ast.NodeVisitor):
             return fn(*values)
         return run
 
+    def _factor_call(self, node: ast.Call) -> Callable:
+        """``factor("<family>", "<column>")`` -> a dynamic feature lookup.
+
+        Both arguments must be STRING LITERALS — the feature name is fixed
+        at compile time (a per-symbol family/column makes no sense in a
+        cross-sectional expression), and the resulting name is exactly
+        what :func:`expr_names` reports so the env pre-fetches it.
+        """
+        if len(node.args) != 2 or not all(isinstance(a, ast.Constant)
+                                          and isinstance(a.value, str)
+                                          for a in node.args):
+            self.fail(node, 'factor() takes two string literals, e.g. '
+                            'factor("finance_Q_factor", "roe")')
+        family, column = node.args[0].value, node.args[1].value
+        feature = factor_feature_name(family, column)
+
+        def run(env):
+            try:
+                return env[feature]
+            except KeyError:
+                raise DslError(
+                    f"factor feature {feature!r} is not in the env") from None
+        return run
+
     # ------------------------------------------------------------ rejects
     def generic_visit(self, node: ast.AST) -> None:  # everything unlisted
         self.fail(node, f"{type(node).__name__} is not allowed in the DSL")
@@ -336,8 +382,9 @@ class _Compiler(ast.NodeVisitor):
 
 def expr_names(expression: str) -> list:
     """The FEATURE names an expression mentions (function names like
-    ``rank`` excluded).  Used for NA bookkeeping: a name is "unknown" for
-    the expression only when every feature it mentions is missing."""
+    ``rank`` excluded; ``factor("f","c")`` contributes its dynamic
+    ``factor_f__c`` name).  Used for NA bookkeeping: a name is "unknown"
+    for the expression only when every feature it mentions is missing."""
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
@@ -347,6 +394,12 @@ def expr_names(expression: str) -> list:
         if isinstance(node, ast.Name) and node.id not in DSL_FUNCTIONS \
                 and node.id not in _RESERVED:
             names.append(node.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "factor" and len(node.args) == 2 \
+                and all(isinstance(a, ast.Constant) and isinstance(a.value, str)
+                        for a in node.args):
+            names.append(factor_feature_name(node.args[0].value,
+                                             node.args[1].value))
     return sorted(set(names))
 
 

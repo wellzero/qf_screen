@@ -1,10 +1,15 @@
 name: value_dividend
 description: >
   Cheap, profitable, low-levered payers on the main boards: positive P/E
-  under 15, TTM ROE above 12%, liabilities under 60% of assets and a
-  trailing dividend yield of at least 3%, ranked by earnings yield blended
-  with the yield.  Statement fields cover only the lxg finance subset
-  (~765 names) -- watch the funnel.
+  under 15, ROE above 12% (roe_best: the lxg statement ROE with the
+  full-market pb/pe-implied ROE as fallback, so the quality leg judges
+  ~5,200 names instead of only the ~764 statement symbols), liabilities
+  under 60% of assets where lxg statements exist and a trailing dividend
+  yield of at least 3%, ranked by earnings yield blended with the yield.
+  The balance leg is na_pass: only ~765 names carry lxg statements, so a
+  name without them passes that leg unjudged (the funnel shows how many) --
+  and because banks, brokers and insurers are levered by construction,
+  they are kept out explicitly rather than waved through unjudged.
 
 universe:
   boards: [main]
@@ -14,8 +19,13 @@ universe:
 filters:
   - {name: liquid,   expr: "amount_ma20 >= 1e8"}
   - {name: value,    expr: "pe_ttm > 0 and pe_ttm < 15"}
-  - {name: quality,  expr: "roe > 0.12"}
-  - {name: balance,  expr: "debt_assets < 0.6"}
+  - {name: quality,  expr: "roe_best > 0.12"}
+  # leverage is knowable only where lxg statements exist (~765 of ~5,500
+  # names); elsewhere the rule declines to judge (na_pass) instead of
+  # silently shrinking the screen to the statement subset
+  - {name: balance,  expr: "debt_assets < 0.6", na_pass: true}
+  # ... which must not let a structurally levered balance sheet in
+  - {name: not_financial, expr: "fillna(financial, 0) < 1"}
   - {name: dividend, expr: "div_yield_ttm >= 0.03"}
 
 rank:

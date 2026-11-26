@@ -48,9 +48,12 @@ def test_run_explain(store_dir, capsys):
     assert "PASS" in out and "explain SH600001" in out
 
 
-def test_run_unknown_preset_fails(store_dir):
-    with pytest.raises(Exception):
+def test_run_unknown_preset_fails(store_dir, capsys):
+    """An unknown preset is a one-line error and a non-zero exit, not a
+    traceback."""
+    with pytest.raises(SystemExit) as exc:
         main(["run", "no_such_preset", *_common(store_dir)])
+    assert "no_such_preset" in str(exc.value) and "not found" in str(exc.value)
 
 
 def test_data_status_json(store_dir, capsys):

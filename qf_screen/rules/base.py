@@ -45,25 +45,68 @@ FeatureBuilder = Callable[["FeaturePanel"], pd.DataFrame]
 #: "table" (date x symbol) or "static" (one value per symbol)
 FEATURES: Dict[str, Tuple[FeatureBuilder, str, str]] = {}
 
+#: disk-cache policy per feature name (only entries that have one):
+#: ``"store"`` marks a table feature that is a pure function of the store's
+#: own base tables and nothing else -- its builder reads ``store.wide(...)``
+#: and never a per-symbol source file, the universe census or another
+#: feature.  Such a table is cached under ``qf_screen_cache/feature_<name>``
+#: behind the STORE fingerprint, so a warm run reads it (~15 ms) instead of
+#: recomputing it (the trailing-window math costs 0.1-0.5 s per feature at
+#: store width).  Anything with a source of its own (alt / statement /
+#: factor data) keeps its own source fingerprint elsewhere and must NOT be
+#: listed here.
+FEATURE_CACHE: Dict[str, str] = {}
+
 
 def register_feature(name: str, builder: FeatureBuilder, description: str = "",
-                     kind: str = "table", replace: bool = False) -> None:
+                     kind: str = "table", replace: bool = False,
+                     cache: Optional[str] = None) -> None:
     """Declare a feature the DSL and the rule helpers can reference.
 
     ``kind="static"`` builders return a frame indexed by SYMBOL (one row per
     name — board, industry ...); ``kind="table"`` builders return a
     ``date x symbol`` frame aligned to the panel calendar.
+
+    ``cache="store"`` (table features only) declares the builder a pure
+    function of the store's base tables and disk-caches its table behind
+    the store fingerprint (:data:`FEATURE_CACHE`).
     """
     if not replace and name in FEATURES:
         raise ValueError(f"feature {name!r} is already registered")
     if kind not in ("table", "static"):
         raise ValueError(f"kind must be 'table' or 'static', got {kind!r}")
+    if cache is not None and (cache != "store" or kind != "table"):
+        raise ValueError(f"cache must be None or 'store' (table features only), "
+                         f"got {cache!r}")
     FEATURES[name] = (builder, description, kind)
+    if cache is None:
+        FEATURE_CACHE.pop(name, None)
+    else:
+        FEATURE_CACHE[name] = cache
 
 
 def feature_names() -> List[str]:
     """Sorted names of every registered feature."""
     return sorted(FEATURES)
+
+
+#: dynamic feature prefix: ``factor_<family>__<column>`` resolves a
+#: precomputed qf_factor / qf_mine per-symbol factor CSV on first use (see
+#: :mod:`qf_screen.data.factor_bridge`)
+_FACTOR_PREFIX = "factor_"
+
+
+def is_dynamic_feature(name: str) -> bool:
+    """Whether ``name`` is a lazily-resolved factor-bridge feature
+    (``factor_<family>__<column>``; the family may itself contain
+    underscores, the column may not)."""
+    return name.startswith(_FACTOR_PREFIX) and "__" in name[len(_FACTOR_PREFIX):]
+
+
+def dynamic_feature_parts(name: str) -> Tuple[str, str]:
+    """``factor_<family>__<column>`` -> ``("<family>", "<column>")``."""
+    family, column = name[len(_FACTOR_PREFIX):].rsplit("__", 1)
+    return family, column
 
 
 # ------------------------------------------------------------------ panel
@@ -80,6 +123,10 @@ class FeaturePanel:
         self.calendar = store.calendar
         self.symbols = store.wide("close").columns
         self._cache: Dict[str, pd.DataFrame] = {}
+        #: human-readable data caveats feature builders discovered while
+        #: building their tables (e.g. stale alt-data sources); the engine
+        #: copies these into :attr:`ScreenResult.warnings`.
+        self.warnings: List[str] = []
 
     # ------------------------------------------------------------ tables
     def table(self, name: str) -> pd.DataFrame:
@@ -88,17 +135,49 @@ class FeaturePanel:
         symbol."""
         if name in self._cache:
             return self._cache[name]
+        if name not in FEATURES and is_dynamic_feature(name):
+            family, column = dynamic_feature_parts(name)
+            from ..data.factor_bridge import factor_feature_table
+            table = factor_feature_table(self, family, column)
+            self._cache[name] = table
+            return table
         try:
             builder, _doc, kind = FEATURES[name]
         except KeyError:
             raise KeyError(
-                f"unknown feature {name!r}; known: {', '.join(feature_names())}") \
+                f"unknown feature {name!r}; known: {', '.join(feature_names())} "
+                f"(or factor_<family>__<column> for a qf_factor CSV bridge)") \
                 from None
-        table = builder(self)
-        if kind == "table" and not table.empty:
-            table = table.reindex(self.calendar)
+        if self._store_cacheable(name):
+            table = self._store_cached(name, builder)
+        else:
+            table = builder(self)
+        if kind == "table" and not table.empty and not table.index.equals(self.calendar):
+            table = table.reindex(self.calendar)     # a cached table already is
         self._cache[name] = table
         return table
+
+    def _store_cacheable(self, name: str) -> bool:
+        """Whether ``name``'s table may be served from the store-keyed disk
+        cache: the builder must have declared ``cache="store"``, the store's
+        cache must be on (it supplies the fingerprint) and no live row may
+        be attached (a provisional row is not worth a cache entry, and must
+        never overwrite the end-of-day one)."""
+        store = self.store
+        return (FEATURE_CACHE.get(name) == "store" and store.use_cache
+                and store.live_date is None and store.fingerprint is not None)
+
+    def _store_cached(self, name: str, builder: FeatureBuilder) -> pd.DataFrame:
+        """Read-through disk cache of a pure-of-store feature table, keyed
+        on the store fingerprint, the calendar bounds, the symbol list and
+        the feature name (see :data:`FEATURE_CACHE`)."""
+        from qf_screen.data.table_cache import cached_wide_table, derived_fingerprint
+
+        store = self.store
+        fingerprint = derived_fingerprint(
+            [], self.calendar, self.symbols, extra=f"store:{store.fingerprint}")
+        return cached_wide_table(store.table_cache_dir, f"feature_{name}", fingerprint,
+                                 lambda: builder(self))
 
     def cross_section(self, name: str, pos: int) -> np.ndarray:
         """One feature's values at calendar row ``pos``.
@@ -113,6 +192,8 @@ class FeaturePanel:
             return np.full(len(self.symbols), np.nan)
         if isinstance(table.index, pd.DatetimeIndex):
             row = table.iloc[pos]
+            if not row.index.equals(self.symbols):
+                row = row.reindex(self.symbols)   # stale cache / foreign table
             if row.dtype == bool:
                 return row.to_numpy(dtype=bool)
             return row.to_numpy() if row.dtype == object \
@@ -131,7 +212,8 @@ class FeaturePanel:
         ``_industry`` key rides along when the industry feature exists."""
         wanted = list(names) if names is not None else feature_names()
         out = {name: self.cross_section(name, pos)
-               for name in wanted if name in FEATURES}
+               for name in wanted
+               if name in FEATURES or is_dynamic_feature(name)}
         if "industry_l1" in FEATURES:
             industry = self.table("industry_l1")
             if not industry.empty:
@@ -152,6 +234,40 @@ class FeaturePanel:
                              f"({self.calendar[0].date()}..{self.calendar[-1].date()})")
         return pos
 
+    def stale_features(self, tol_sessions: int = 20) -> List[Tuple[str, pd.Timestamp, float]]:
+        """Built table features whose data ends well before the calendar.
+
+        Returns ``(name, last date any symbol has a value, share of symbols
+        whose own last value is older than ``tol_sessions``)`` for every
+        BUILT table whose cross-section is materially stale — the honest
+        signal that an alt-data download (northbound, margin ...) lags the
+        price files, so a screen on it is deciding on old data.
+        """
+        end = len(self.calendar) - 1
+        out: List[Tuple[str, pd.Timestamp, float]] = []
+        for name, table in self._cache.items():
+            if name.startswith("_") or not isinstance(table.index, pd.DatetimeIndex) \
+                    or table.empty or name in FEATURES and FEATURES[name][2] != "table":
+                continue
+            last_row = table.iloc[end].to_numpy(dtype=float) if len(table) > end \
+                else table.iloc[-1].to_numpy(dtype=float)
+            covered = np.isfinite(last_row)
+            if not covered.any():
+                continue
+            # last valid date per symbol, vectorized: argmax over the
+            # reversed finiteness mask is the last finite row
+            values = table.to_numpy(dtype=float)
+            finite = np.isfinite(values)
+            any_finite = finite.any(axis=0)
+            last_pos = values.shape[0] - 1 - np.argmax(finite[::-1], axis=0)
+            stale = (end - last_pos) > tol_sessions
+            stale &= any_finite
+            share = float(stale.sum()) / float(any_finite.sum())
+            newest = table.index[last_pos[any_finite]].max()
+            if share > 0.5 and (end - last_pos[any_finite]).max() > tol_sessions:
+                out.append((name, pd.Timestamp(newest), share))
+        return out
+
 
 # ------------------------------------------------------------------ rules
 class Filter:
@@ -171,6 +287,13 @@ class Filter:
 
     def passes(self, panel: FeaturePanel, pos: int) -> np.ndarray:
         raise NotImplementedError
+
+    def evaluate(self, panel: FeaturePanel, pos: int
+                 ) -> Tuple[np.ndarray, "Optional[np.ndarray]"]:
+        """``(passed, unknown)``: the verdict and, for a rule that can be
+        left without data, the mask of names it could not judge (``None``
+        for rules that always judge, the default here)."""
+        return self.passes(panel, pos), None
 
     def __repr__(self) -> str:
         return f"<Filter {self.name}>"
@@ -223,10 +346,61 @@ class CombinedRanker(Ranker):
 
 
 # ------------------------------------------------------- feature builders
+def _safe_div(num, den) -> pd.DataFrame:
+    """``num / den`` over wide frames as PLAIN NUMPY.
+
+    pandas routes wide ``DataFrame / DataFrame`` through numexpr past the
+    ~10k-cell threshold, which this environment silently corrupts on
+    float32 + NaN input (see the package docstring) — so the feature
+    builders divide through numpy explicitly.  The result keeps the LEFT
+    frame's index/columns; a scalar or Series denominator is accepted
+    positionally.
+    """
+    a = num.to_numpy(dtype=float)
+    b = den.to_numpy(dtype=float) if isinstance(den, pd.DataFrame) \
+        else np.asarray(den, dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.divide(a, b)
+    return pd.DataFrame(out, index=num.index, columns=num.columns)
+
+
+def _safe_sub(num, den) -> pd.DataFrame:
+    """``num - den`` over wide frames, plain numpy (see :func:`_safe_div`)."""
+    a = num.to_numpy(dtype=float)
+    b = den.to_numpy(dtype=float) if isinstance(den, pd.DataFrame) \
+        else np.asarray(den, dtype=float)
+    return pd.DataFrame(np.subtract(a, b), index=num.index, columns=num.columns)
+
+
+def _coalesce(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    """``primary`` where it is not NaN, else ``fallback`` — what pandas'
+    ``combine_first`` means for two equally-shaped float frames — as PLAIN
+    NUMPY.
+
+    ``combine_first`` is the single slowest step of a warm-cache screen:
+    it routes through the element-wise ``combine`` path and costs ~2 s per
+    call on a store-scale frame (two calls per ``value_dividend`` run),
+    which quietly handed back most of the time the store cache saves.  The
+    result keeps the PRIMARY frame's axes; a fallback on other axes is
+    reindexed onto them first (a fallback with rows/columns the primary
+    lacks contributes nothing, unlike ``combine_first``, which would add
+    them — every caller here passes equally-aligned tables).
+    """
+    if not (primary.index.equals(fallback.index)
+            and primary.columns.equals(fallback.columns)):
+        fallback = fallback.reindex(index=primary.index, columns=primary.columns)
+    out = primary.to_numpy(dtype=float, copy=True)
+    np.copyto(out, fallback.to_numpy(dtype=float), where=np.isnan(out))
+    return pd.DataFrame(out, index=primary.index, columns=primary.columns)
+
+
 def _inverse_positive(table: pd.DataFrame) -> pd.DataFrame:
     """``1 / table`` where the value is positive, NaN elsewhere (a negative
     P/E is a loss — its "yield" must not rank as a bargain)."""
-    return 1.0 / table.where(table > 0)
+    values = table.to_numpy(dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.divide(1.0, np.where(values > 0, values, np.nan))
+    return pd.DataFrame(out, index=table.index, columns=table.columns)
 
 
 def _pct_change(close: pd.DataFrame) -> pd.DataFrame:
@@ -249,7 +423,7 @@ def register_price_features() -> None:
     def momentum(lookback: int, skip: int) -> FeatureBuilder:
         def build(panel: FeaturePanel) -> pd.DataFrame:
             close = panel.store.wide("close").astype(float)
-            return close.shift(skip) / close.shift(lookback) - 1.0
+            return _safe_sub(_safe_div(close.shift(skip), close.shift(lookback)), 1.0)
         return build
 
     def volatility(window: int) -> FeatureBuilder:
@@ -262,7 +436,7 @@ def register_price_features() -> None:
         def build(panel: FeaturePanel) -> pd.DataFrame:
             close = panel.store.wide("close").astype(float)
             ma = close.rolling(window, min_periods=max(2, window // 2)).mean()
-            return close / ma
+            return _safe_div(close, ma)
         return build
 
     def rolling_mean(field: str, window: int) -> FeatureBuilder:
@@ -306,32 +480,42 @@ def register_price_features() -> None:
         def build(panel: FeaturePanel) -> pd.DataFrame:
             close = panel.store.wide("close").astype(float)
             hi = close.rolling(window, min_periods=max(2, window // 2)).max()
-            return close / hi
+            return _safe_div(close, hi)
         return build
 
+    # every window feature below reads nothing but ``store.wide(...)`` and
+    # costs real arithmetic at store width (0.1 s per rolling mean, 0.5 s
+    # for max21), so each is disk-cached behind the store fingerprint
+    cached = {"cache": "store"}
     for lookback in (21, 63, 126, 252):
         register_feature(
             f"ret_{lookback}d", momentum(lookback, 0),
-            f"{lookback}-day total return (adjusted close, no skip)")
+            f"{lookback}-day total return (adjusted close, no skip)", **cached)
         if lookback >= 63:
             register_feature(
                 f"mom_{lookback}s21", momentum(lookback, 21),
-                f"momentum: {lookback}-day return skipping the most recent 21 days")
+                f"momentum: {lookback}-day return skipping the most recent 21 days",
+                **cached)
     for window in (20, 60, 120):
         register_feature(f"vol_{window}d", volatility(window),
-                         f"annualized trailing {window}-day return volatility")
+                         f"annualized trailing {window}-day return volatility",
+                         **cached)
     for window in (20, 60, 200):
         register_feature(f"ma_ratio_{window}", ma_ratio(window),
-                         f"adjusted close / its trailing {window}-day mean (>1 = above)")
+                         f"adjusted close / its trailing {window}-day mean (>1 = above)",
+                         **cached)
     for window in (20, 60):
         register_feature(f"amount_ma{window}", rolling_mean("amount", window),
-                         f"trailing {window}-day mean traded value (CNY)")
+                         f"trailing {window}-day mean traded value (CNY)", **cached)
         register_feature(f"turnover_ma{window}", rolling_mean("turnoverrate", window),
-                         f"trailing {window}-day mean turnover rate (% of float)")
+                         f"trailing {window}-day mean turnover rate (% of float)",
+                         **cached)
     register_feature("high252_ratio", high_ratio(252),
-                     "adjusted close / trailing 252-day high (George–Hwang)")
+                     "adjusted close / trailing 252-day high (George–Hwang)",
+                     **cached)
     register_feature("max21", max_lottery(21, 5),
-                     "mean of the 5 largest daily returns in the trailing 21 days (MAX)")
+                     "mean of the 5 largest daily returns in the trailing 21 days (MAX)",
+                     **cached)
     for field, doc in (
             ("pe_ttm", "trailing P/E"), ("pe_static", "static P/E"), ("pb", "price/book"),
             ("ps_ttm", "trailing P/S"), ("pcf_ttm", "trailing P/CF"), ("peg", "PEG"),

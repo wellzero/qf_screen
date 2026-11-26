@@ -20,7 +20,26 @@ The public names are exported lazily so ``import qf_screen`` stays cheap::
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
+
+# --------------------------------------------------------------- numexpr
+# CRITICAL (v0.2): pandas delegates wide DataFrame binary ops (+ - * /) to
+# numexpr when the frames hold > ~10k cells, and this environment's
+# numexpr 2.10.2 / numpy 2.4 combination SILENTLY CORRUPTS float32 arrays
+# that contain NaN -- measured 1.38 M of 3.4 M cells wrong in a 630 x 5472
+# division (ma_ratio_200 came back 0.0 for thousands of names, leaving 26
+# of 5,472 passing the trend filter).  Disabling numexpr routes every op
+# through plain numpy, which is exact; the measured cost on store-scale
+# frames is negligible next to the I/O.  The wide-arithmetic helpers in
+# :mod:`qf_screen.rules.base` additionally bypass pandas arithmetic
+# outright, so a host that re-enables numexpr stays correct too.
+try:  # pragma: no cover - exercised implicitly by every import
+    import pandas as _pd
+
+    if _pd.options.compute.use_numexpr:
+        _pd.options.compute.use_numexpr = False
+except Exception:  # noqa: BLE001 - pandas always present; belt and braces
+    pass
 
 #: lazy exports: name -> submodule (imported on first attribute access)
 _LAZY = {

@@ -8,14 +8,15 @@ from __future__ import annotations
 
 from .base import (
     ANN, FEATURES, CombinedRanker, FeatureBuilder, FeaturePanel, Filter, Ranker,
-    feature_names, register_feature,
+    dynamic_feature_parts, feature_names, is_dynamic_feature, register_feature,
 )
 from .dsl import (
     DslError, allowed_functions, compile_bool, compile_expr, compile_score, expr_names,
+    factor_feature_name,
 )
 from .hygiene import (
-    BoardFilter, ExprFilter, NotSuspended, exclude_st, liquidity_floor, listing_age,
-    price_floor, turnover_ceiling,
+    BoardFilter, ExprFilter, NotSuspended, SymbolSetFilter, exclude_st,
+    liquidity_floor, listing_age, price_floor, turnover_ceiling,
 )
 from .technical import (
     ExprRanker, drawdown_guard, low_volatility, momentum, near_high, not_lottery, trend,
@@ -27,13 +28,14 @@ from .fundamental import (
 __all__ = [
     # base
     "ANN", "FEATURES", "CombinedRanker", "FeatureBuilder", "FeaturePanel", "Filter",
-    "Ranker", "feature_names", "register_feature",
+    "Ranker", "dynamic_feature_parts", "feature_names", "is_dynamic_feature",
+    "register_feature",
     # dsl
     "DslError", "allowed_functions", "compile_bool", "compile_expr", "compile_score",
-    "expr_names",
+    "expr_names", "factor_feature_name",
     # hygiene
-    "BoardFilter", "ExprFilter", "NotSuspended", "exclude_st", "liquidity_floor",
-    "listing_age", "price_floor", "turnover_ceiling",
+    "BoardFilter", "ExprFilter", "NotSuspended", "SymbolSetFilter", "exclude_st",
+    "liquidity_floor", "listing_age", "price_floor", "turnover_ceiling",
     # technical
     "ExprRanker", "drawdown_guard", "low_volatility", "momentum", "near_high",
     "not_lottery", "trend",

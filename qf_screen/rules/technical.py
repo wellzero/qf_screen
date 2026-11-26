@@ -66,11 +66,13 @@ class ExprRanker(Ranker):
         from .dsl import compile_score, expr_names
         self.expr = expr
         self.features = expr_names(expr)
-        unknown = [f for f in self.features if f not in _known_features()]
+        unknown = [f for f in self.features
+                   if f not in _known_features() and not _is_dynamic(f)]
         if unknown:
             from .base import feature_names
             raise ValueError(f"ranker {name!r} references unknown feature(s) "
-                             f"{unknown}; known: {', '.join(feature_names())}")
+                             f"{unknown}; known: {', '.join(feature_names())} "
+                             '(or factor_<family>__<column>)')
         self._fn = compile_score(expr)
 
     def score(self, panel, pos) -> np.ndarray:
@@ -83,3 +85,8 @@ class ExprRanker(Ranker):
 def _known_features() -> frozenset:
     from .base import FEATURES
     return frozenset(FEATURES)
+
+
+def _is_dynamic(name: str) -> bool:
+    from .base import is_dynamic_feature
+    return is_dynamic_feature(name)

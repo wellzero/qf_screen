@@ -11,6 +11,9 @@ The universe is the union of two sources, because each one alone is biased:
   (the survivorship evidence), but knows nothing about them beyond their
   prices.
 
+The census is cached on disk (see :func:`build_universe`), keyed on the
+exact inputs that produce it.
+
 The store carries duplicate directory trees for the same company under
 different spellings (``SH600036``, ``600036`` AND ``600036.SS``), so every
 canonical symbol maps to an ordered tuple of directory names; the
@@ -24,6 +27,7 @@ applies).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -35,11 +39,33 @@ import numpy as np
 import pandas as pd
 
 from quant_free.common.const_filename import EQUITY_DIR, PROVIDER_LXG, get_data_dir
-from quant_free.datapull.cn_delisted_backfill import _INDEX_RE, canonical_equity_symbol
 
 from ._io import ColumnSpec, read_bytes, read_csv, read_csv_typed, to_dates
 
 logger = logging.getLogger(__name__)
+
+#: (canonical_equity_symbol, _INDEX_RE) of
+#: :mod:`quant_free.datapull.cn_delisted_backfill`, bound on FIRST USE
+_SIBLING: Optional[Tuple[object, object]] = None
+
+
+def _quant_free_symbols():
+    """The two symbol helpers this module takes from the sibling repo,
+    imported on first use rather than at import time.
+
+    That module pulls in ``quant_free.utils.us_equity_utils`` — which
+    imports ``yfinance`` (and with it bs4, peewee, ...) — for two
+    regex-level helpers: ~0.11 s of every ``qf-screen`` start.  A warm run
+    (universe served from its cache) never needs either helper at all.
+    """
+    global _SIBLING
+    if _SIBLING is None:
+        from quant_free.datapull.cn_delisted_backfill import (
+            _INDEX_RE, canonical_equity_symbol,
+        )
+
+        _SIBLING = (canonical_equity_symbol, _INDEX_RE)
+    return _SIBLING
 
 # ------------------------------------------------------------------ boards
 SH_MAIN = "sh_main"      # 沪市主板  600/601/603/605
@@ -87,7 +113,7 @@ _META_COLUMNS: Tuple[str, ...] = (
 def board_of(symbol: str) -> Optional[str]:
     """A-share board of ``symbol`` in any spelling, or ``None`` when the code
     is not in an A-share range (B-shares, ETFs, bonds, index series ...)."""
-    canon = canonical_equity_symbol(symbol)
+    canon = _quant_free_symbols()[0](symbol)
     if canon is None:
         return None
     exchange, code = canon[:2], canon[2:]
@@ -166,13 +192,14 @@ def scan_equity_dirs(root) -> Dict[str, Tuple[str, ...]]:
     """
     if root is None or not Path(root).is_dir():
         return {}
+    canonical_equity_symbol, index_re = _quant_free_symbols()
     found: Dict[str, List[str]] = {}
     with os.scandir(root) as entries:
         for entry in entries:
             if not entry.is_dir():
                 continue
             name = entry.name
-            if _INDEX_RE.match(name.upper()):
+            if index_re.match(name.upper()):
                 continue
             canon = canonical_equity_symbol(name)
             if canon is not None:
@@ -335,11 +362,30 @@ def _is_nan(value) -> bool:
 
 
 def build_universe(data_dir=None, market: str = "cn", with_industries: bool = True,
-                   max_workers: int = 16) -> Universe:
-    """Universe = company-list snapshot ∪ on-disk stock directories."""
+                   max_workers: int = 16, use_cache: bool = True) -> Universe:
+    """Universe = company-list snapshot ∪ on-disk stock directories.
+
+    The census is a pure function of three things on disk — the set of
+    equity directories, ``company_list.csv`` and every
+    ``<dir>/lxg/industries.csv`` — so it is cached under
+    ``qf_screen_cache/universe_<market>.*`` behind
+    :func:`universe_fingerprint` of exactly those.  Building it costs ~1 s
+    on the real store (2,042 ``industries.csv`` parses plus a scan of
+    ~9,800 directories) and every command needs it; reading it back costs
+    a few tens of ms.  ``use_cache=False`` (``--no-cache``) builds from
+    source and touches nothing.
+    """
     data_dir = Path(data_dir or get_data_dir())
     root = data_dir / market / EQUITY_DIR
     list_path = data_dir / market / PROVIDER_LXG / "company_list.csv"
+    cacheable = bool(use_cache and with_industries)
+    fingerprint = universe_fingerprint(root, list_path) if cacheable else None
+    if cacheable:
+        cached = _read_universe_cache(data_dir, market, root, fingerprint)
+        if cached is not None:
+            logger.info("universe: %d symbols (names as of %s) FROM CACHE",
+                        len(cached), cached.names_asof)
+            return cached
 
     raw = read_csv(list_path, dtype=str)
     listed = _parse_company_list(raw) if raw is not None \
@@ -373,6 +419,114 @@ def build_universe(data_dir=None, market: str = "cn", with_industries: bool = Tr
             values = pd.Series({s: levels[s][idx] for s in levels}, dtype=object)
             meta[col] = values.reindex(meta.index).to_numpy()
 
+    universe = Universe(meta=meta, dirs=dirs, root=root, names_asof=names_asof)
     logger.info("universe: %d symbols (%d in company list, %d on disk, "
                 "names as of %s)", len(meta), len(listed), len(dirs), names_asof)
+    if cacheable:
+        _write_universe_cache(data_dir, market, universe, fingerprint)
+    return universe
+
+
+# ------------------------------------------------------------ universe cache
+#: cache file stem under ``qf_screen_cache/`` and the format version kept
+#: in its sidecar (bump to invalidate)
+_UNIVERSE_VERSION = "v1"
+
+
+def universe_fingerprint(root, list_path) -> str:
+    """``<equity dir count>:<industries file count>:<mtime sum>`` over the
+    equity tree, ``company_list.csv`` and every ``<dir>/lxg/industries.csv``
+    — exactly the inputs of :func:`build_universe`.
+
+    The directory COUNT alone catches a listing or delisting; the
+    industries census catches a new lxg download that starts classifying
+    names whose directory already existed, and a rewrite of any one of
+    them (the download bumps the mtime); the mtime SUM catches a rewrite
+    that leaves a file older than the newest input.  ~30 ms on the real
+    store's ~9,800 directories.
+    """
+    count = industries = 0
+    total = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                count += 1
+                try:
+                    total += os.stat(os.path.join(entry.path, PROVIDER_LXG,
+                                                  "industries.csv")).st_mtime_ns
+                except OSError:
+                    continue
+                industries += 1
+    except OSError:
+        pass
+    try:
+        total += os.stat(list_path).st_mtime_ns
+    except OSError:
+        pass
+    return f"{count}:{industries}:{total}"
+
+
+def _universe_cache_base(data_dir, market: str) -> Path:
+    from .table_cache import cache_dir_for
+
+    return cache_dir_for(data_dir, market) / f"universe_{market}"
+
+
+def _read_universe_cache(data_dir, market: str, root: Path,
+                         fingerprint: str) -> Optional[Universe]:
+    """The cached universe when its fingerprint matches, else ``None``."""
+    base = _universe_cache_base(data_dir, market)
+    try:
+        import pyarrow  # noqa: F401 - parquet engine; miss if absent
+
+        doc = json.loads(base.with_name(base.name + ".meta.json").read_text(encoding="utf-8"))
+        if doc.get("version") != _UNIVERSE_VERSION or doc.get("fingerprint") != fingerprint:
+            return None
+        meta = pd.read_parquet(base.with_name(base.name + ".parquet"))
+        dirs = {symbol: tuple(names) for symbol, names in doc["dirs"].items()}
+        # the metadata and the directory map must agree: every mapped
+        # directory is a metadata row (the list-only names have no directory)
+        if meta.index.has_duplicates or not set(dirs) <= set(meta.index) \
+                or list(meta.columns) != list(_META_COLUMNS):
+            return None
+    except Exception:  # noqa: BLE001 - any cache problem is a miss
+        return None
+    names_asof = pd.Timestamp(doc["names_asof"]) if doc.get("names_asof") else None
+    # parquet hands nulls back as None; a freshly built census carries NaN
+    # in its text columns (the company-list reindex), so restore that
+    for column in meta.columns:
+        if meta[column].dtype == object:
+            values = meta[column].to_numpy()
+            holes = np.array([value is None for value in values], dtype=bool)
+            if holes.any():
+                meta[column] = np.where(holes, np.nan, values)
     return Universe(meta=meta, dirs=dirs, root=root, names_asof=names_asof)
+
+
+def _write_universe_cache(data_dir, market: str, universe: Universe,
+                          fingerprint: str) -> None:
+    """Persist the universe (best effort).  The metadata frame is replaced
+    before the sidecar that names its fingerprint, so an interrupted write
+    is a miss on the next run, never a stale hit."""
+    base = _universe_cache_base(data_dir, market)
+    try:
+        import pyarrow  # noqa: F401
+
+        base.parent.mkdir(parents=True, exist_ok=True)
+        tmp = base.with_name(base.name + ".parquet.tmp")
+        universe.meta.to_parquet(tmp)
+        tmp.replace(base.with_name(base.name + ".parquet"))
+        doc = {
+            "version": _UNIVERSE_VERSION, "fingerprint": fingerprint,
+            "names_asof": universe.names_asof.isoformat()
+            if universe.names_asof is not None else None,
+            "dirs": {symbol: list(names) for symbol, names in universe.dirs.items()},
+        }
+        sidecar = base.with_name(base.name + ".meta.json")
+        tmp = base.with_name(base.name + ".meta.json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(sidecar)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("universe cache write failed (%s) -- continuing without", exc)

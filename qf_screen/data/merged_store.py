@@ -63,6 +63,7 @@ thresholds never need more.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -73,6 +74,7 @@ import pandas as pd
 from quant_free.common.const_filename import get_data_dir
 from quant_free.common.symbol_format import to_canonical
 
+from .table_cache import read_wide, write_wide
 from ._io import DAY
 from .ak_provider import AkProvider, LiveAkClient, LiveDataError
 from .lxg_provider import LXG_FILES, LxgProvider
@@ -84,7 +86,7 @@ logger = logging.getLogger(__name__)
 BASE_FIELDS: Tuple[str, ...] = (
     "close_raw", "close", "volume", "amount", "turnoverrate", "pe_ttm", "pe_static",
     "pb", "ps_ttm", "pcf_ttm", "peg", "market_cap", "float_market_cap",
-    "total_shares", "float_shares",
+    "total_shares", "float_shares", "dyr",
 )
 
 #: split-detection gates (see :func:`build_adjusted_close`)
@@ -369,6 +371,10 @@ def merge_symbol(lxg: LxgProvider, ak: AkProvider, dirs: Sequence[str], *,
         "amount": amount,
         "volume": pick(*both(src(D, "volume"))),
         "turnoverrate": pick(*both(src(D, "turnoverrate"), src(B, "turnoverrate"))),
+        # lxg layout-B's own trailing dividend yield (a fraction) — the
+        # fallback div_yield_ttm uses for names whose dividend events the
+        # event builder cannot see
+        "dyr": pick(*both(src(D, "dyr"))),
     }
     for name, column in _VALUATION_COLS:
         fields[name] = pick(*both(src(V, column), src(B, column)))
@@ -431,6 +437,33 @@ def _run_worker(item):
     return _WORKER(item)
 
 
+# --------------------------------------------------------------- fingerprint
+def source_fingerprint(root, symbols, dir_names, sources: Sequence[Tuple[str, str]]) -> str:
+    """``<file count>:<mtime sum>`` over every ``<dir>/<provider>/<file>``
+    the merge reads -- the merged tables are a pure function of exactly
+    these (any rewrite of the daily data moves the mtime sum and invalidates
+    a cache built on them; the sum rather than the newest mtime, see
+    :func:`qf_screen.data.table_cache.fingerprint`).
+
+    ``dir_names(symbol)`` resolves a symbol's directory aliases (a file may
+    sit under any of them).  Plain ``os.stat`` on joined strings: pathlib
+    costs ~5x more per call, which over ~22,000 source files was 0.2 s of
+    every warm run.
+    """
+    prefix = f"{str(root).rstrip(os.sep)}{os.sep}"
+    count, total = 0, 0
+    for symbol in symbols:
+        for name in dir_names(symbol):
+            head = f"{prefix}{name}{os.sep}"
+            for provider, filename in sources:
+                try:
+                    total += os.stat(f"{head}{provider}{os.sep}{filename}").st_mtime_ns
+                except OSError:
+                    continue
+                count += 1
+    return f"{count}:{total}"
+
+
 # ------------------------------------------------------------------- store
 class CNDataStore:
     """Local-first CN data facade: per-symbol merge -> wide tables.
@@ -459,19 +492,25 @@ class CNDataStore:
     last_session : last complete session on the calendar.
     provenance : per-symbol ``DataFrame`` (sources, date range, adjustments).
     warnings : human-readable data caveats found while loading.
+    fingerprint : source-file census the merged tables are keyed on
+        (``None`` while the cache is off).
     """
 
     def __init__(self, data_dir=None, market: str = "cn",
                  symbols: Optional[Sequence[str]] = None, start=None, end=None,
                  warmup_rows: int = 600, max_workers: int = 1, refresh: bool = False,
                  ttl_spot: float = 1800.0, ttl_boards: float = 86400.0,
-                 akshare=None, universe: Optional[Universe] = None):
+                 akshare=None, universe: Optional[Universe] = None,
+                 use_cache: bool = True):
         self.data_dir = Path(data_dir or get_data_dir())
         self.market = market
         self.lxg = LxgProvider(self.data_dir, market)
         self.ak = AkProvider(self.data_dir, market)
+        #: read / write the disk caches (``--no-cache`` disables every one:
+        #: the universe census, the merged tables and the derived tables)
+        self.use_cache = bool(use_cache)
         self.universe = universe if universe is not None \
-            else build_universe(self.data_dir, market)
+            else build_universe(self.data_dir, market, use_cache=self.use_cache)
 
         self.start = pd.Timestamp(start) if start else None
         self.end = pd.Timestamp(end) if end else None
@@ -489,6 +528,7 @@ class CNDataStore:
         self.calendar = pd.DatetimeIndex([], name="date")
         self.last_session = pd.NaT
         self.warnings: List[str] = []
+        self._fingerprint: Optional[str] = None
         #: traded names on the last session relative to the one before
         self.last_session_share = 1.0
         self._load(max_workers)
@@ -515,6 +555,12 @@ class CNDataStore:
 
     def _load(self, max_workers: int) -> None:
         t0 = time.time()
+        if self.use_cache and self._read_store_cache():
+            logger.info("store: %d symbols, %d sessions %s..%s FROM CACHE in %.1fs",
+                        len(self.provenance), len(self.calendar),
+                        self.calendar[0].date(), self.calendar[-1].date(),
+                        time.time() - t0)
+            return
         workers = int(max_workers or 1)
         if workers > 1 and len(self.symbols) >= 4 * workers:
             loaded = self._load_parallel(workers)
@@ -550,6 +596,133 @@ class CNDataStore:
             self._wide[field] = pd.DataFrame(out, index=self.calendar, columns=symbols)
         logger.info("store: %d symbols, %d sessions %s..%s loaded in %.1fs",
                     len(symbols), len(calendar), calendar[0], calendar[-1], time.time() - t0)
+        if self.use_cache:
+            self._write_store_cache(symbols)
+
+    # ------------------------------------------------------- store cache
+    #: per-symbol source files whose stats fingerprint the merged tables
+    #: (see :func:`source_fingerprint`)
+    _CACHE_SOURCES = (("ak", "basic.csv"), ("lxg", "daily.csv"),
+                      ("lxg", "valuation.csv"), ("lxg", "dividend.csv"))
+
+    @staticmethod
+    def symbols_key(symbols) -> str:
+        """Short hash of a symbol list — the part of a cache directory name
+        that tells two symbol sets apart."""
+        import hashlib
+
+        return hashlib.sha1("|".join(symbols).encode()).hexdigest()[:10]
+
+    @property
+    def window_key(self) -> str:
+        """This store's window as a short name — ``tail600_<symbols>`` or
+        ``hist<start>-<end>_<symbols>`` — the part that tells the daily
+        snapshot and a validation window apart in the cache."""
+        mode = f"tail{self.tail_rows}" if self.start is None \
+            else f"hist{self.start.date()}-{self.end.date() if self.end else 'open'}"
+        return f"{mode}_{self.symbols_key(self.symbols)}"
+
+    @property
+    def table_cache_dir(self) -> Path:
+        """Where this store's DERIVED feature tables are cached:
+        ``qf_screen_cache/tables/<window key>/``.
+
+        Every derived table (alt / statement step / dividend / factor /
+        price feature) is aligned to ONE window — this store's calendar and
+        symbol list — so each window keeps its own.  With one shared file
+        per table, a validation window overwrote the daily snapshot's
+        tables and the next morning's ``run`` rebuilt them (~12 s).
+        """
+        from .table_cache import TABLES_DIR, cache_dir_for
+
+        return cache_dir_for(self.data_dir, self.market) / TABLES_DIR / self.window_key
+
+    def _store_cache_dir(self):
+        from qf_screen import __version__
+        from .table_cache import cache_dir_for
+
+        return (cache_dir_for(self.data_dir, self.market)
+                / f"store_{self.window_key}_v{__version__.replace('.', '')}")
+
+    def _read_store_cache(self) -> bool:
+        """Hydrate calendar/provenance/wide tables from the parquet cache.
+
+        Returns False on any miss (absent, stale, unreadable, or the symbol
+        alignment changed) — the caller then merges from source.
+        """
+        directory = self._store_cache_dir()
+        try:
+            import json
+
+            meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+            if meta.get("fingerprint") != self.fingerprint \
+                    or meta.get("base_fields") != list(BASE_FIELDS):
+                return False
+            provenance = pd.read_parquet(directory / "provenance.parquet")
+            if "symbol" in provenance.columns:      # restore the index
+                provenance = provenance.set_index("symbol")
+            calendar = pd.DatetimeIndex(pd.to_datetime(meta["calendar"]), name="date")
+            loaded = list(meta["symbols"])
+
+            # the 16 flat tables decompress in parallel (pyarrow drops the
+            # GIL); each read also checks its own alignment
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _read(field):
+                table = read_wide(directory / f"wide_{field}.parquet",
+                                  index=calendar, columns=loaded)
+                return field, table
+
+            with ThreadPoolExecutor(max_workers=min(4, len(BASE_FIELDS))) as pool:
+                wide = dict(pool.map(_read, BASE_FIELDS))
+        except Exception:  # noqa: BLE001 - any cache problem is a miss
+            return False
+        if len(calendar) == 0 or any(table is None for table in wide.values()):
+            return False
+        self.calendar = calendar
+        self.last_session = calendar[-1]
+        self.provenance = provenance
+        self._wide = wide
+        self.last_complete_session = pd.Timestamp(meta["last_complete_session"])
+        self.last_session_share = float(meta.get("last_session_share", 1.0))
+        self.warnings.extend(meta.get("warnings", []))
+        return True
+
+    def _write_store_cache(self, symbols: List[str]) -> None:
+        """Persist the merged tables atomically (best effort — an
+        unwritable cache directory only costs speed).  Every table lands
+        before the ``meta.json`` that names the fingerprint, so a process
+        killed mid-write leaves a cache the next run rebuilds, never one it
+        trusts."""
+        import json
+
+        directory = self._store_cache_dir()
+        try:
+            import pyarrow  # noqa: F401
+
+            directory.mkdir(parents=True, exist_ok=True)
+            provenance = self.provenance.reset_index()
+            tmp = directory / "provenance.parquet.tmp"
+            provenance.to_parquet(tmp, index=False)
+            tmp.replace(directory / "provenance.parquet")
+            for field in BASE_FIELDS:
+                tmp = directory / f"wide_{field}.parquet.tmp"
+                write_wide(tmp, self._wide[field])
+                tmp.replace(directory / f"wide_{field}.parquet")
+            meta = {
+                "fingerprint": self.fingerprint,
+                "symbols": list(symbols),
+                "calendar": [str(d.date()) for d in self.calendar],
+                "last_complete_session": str(self.last_complete_session.date()),
+                "last_session_share": self.last_session_share,
+                "warnings": list(self.warnings),
+                "base_fields": list(BASE_FIELDS),
+            }
+            tmp = directory / "meta.json.tmp"
+            tmp.write_text(json.dumps(meta), encoding="utf-8")
+            tmp.replace(directory / "meta.json")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("store cache write failed (%s) -- continuing without", exc)
 
     def _load_parallel(self, workers: int) -> list:
         """``merge_symbol`` over ``workers`` (processes when the caller's
@@ -646,6 +819,18 @@ class CNDataStore:
                 f"{self.last_complete_session.date()}")
 
     # ------------------------------------------------------------ access
+    @property
+    def fingerprint(self) -> Optional[str]:
+        """``source_fingerprint`` over the files this store's tables were
+        merged from — computed once per store, and only while the cache is
+        on (``--no-cache`` neither reads nor writes anything keyed on it).
+        The price-feature cache (:mod:`qf_screen.rules.base`) keys on it
+        too: those features are pure functions of these tables."""
+        if self._fingerprint is None and self.use_cache:
+            self._fingerprint = source_fingerprint(
+                self.lxg.root, self.symbols, self.universe.dir_names, self._CACHE_SOURCES)
+        return self._fingerprint
+
     def wide(self, name: str) -> pd.DataFrame:
         """As-traded wide table ``date x symbol`` (row ``t`` = day ``t``)."""
         if name not in self._wide:
@@ -667,6 +852,22 @@ class CNDataStore:
         return self.decision_date
 
     # ------------------------------------------------- per-symbol sources
+    def symbols_with_file(self, provider: str, filename: str) -> List[str]:
+        """Loaded symbols whose directory tree actually carries
+        ``<provider>/<filename>`` (a skip list: the alt/dividend/factor
+        builders iterate only these instead of stat-ing ~3,400 empty dirs
+        every build).  ``provider`` is ``"lxg"`` or ``"ak"``.
+
+        Cached per (provider, filename) for the life of the store.
+        """
+        key = ("have_file", provider, filename)
+        if key not in self._alt:
+            backend = self.lxg if provider == "lxg" else self.ak
+            dirs = self.universe.dirs
+            self._alt[key] = [s for s in self.symbols
+                              if backend.find(dirs.get(s, ()), filename) is not None]
+        return self._alt[key]
+
     def _cached(self, key: tuple, loader):
         if key not in self._alt:
             self._alt[key] = loader()
@@ -697,6 +898,13 @@ class CNDataStore:
         :meth:`LxgProvider.dividend_events`), or ``None``.  Cached."""
         return self._cached((symbol, "dividend"), lambda: self.lxg.dividend_events(
             self.universe.dir_names(symbol)))
+
+    def index_close(self, code: str):
+        """Daily close of an index from the store's lxg index tree
+        (:meth:`LxgProvider.index_close`; ``"000300"`` ...), or ``None``
+        when the store has no such file.  A benchmark series — nothing in
+        a screen reads it.  Cached per code."""
+        return self._cached(("index", code), lambda: self.lxg.index_close(code))
 
     def finance(self, symbol: str):
         """TTM canonical statement frame from the lxg bridge
@@ -759,6 +967,39 @@ class CNDataStore:
             else client.concept_members()
         return frame
 
+    def enrich_industry_tags(self) -> int:
+        """Give names WITHOUT a local lxg industry an ``industry_l1`` tag
+        from the 东财 industry boards (``--live``; the board file is
+        disk-cached for the day).
+
+        The 申万 classification of ``lxg/industries.csv`` covers only the
+        ~2,000 names with an lxg tree; the other ~3,400 carry no industry
+        at all, which is where a sector breakdown or a ``max_per_industry``
+        cap goes blind.  A local tag is never overwritten -- the fallback
+        only fills gaps -- and a name in several boards gets them joined
+        with ``/``.  Returns the number of tags filled.
+        """
+        if "industry_l1" not in self.universe.meta.columns:
+            return 0
+        meta = self.universe.meta
+        frame = self.board_members("industry")
+        boards: Dict[str, List[str]] = {}
+        for symbol, group in frame.groupby("symbol")["board"]:
+            boards[str(symbol)] = sorted({str(b) for b in group})
+        filled = 0
+        for symbol in self.symbols:
+            if symbol not in meta.index or symbol not in boards:
+                continue
+            current = meta.at[symbol, "industry_l1"]
+            if isinstance(current, str) and current.strip():
+                continue                            # a local tag always wins
+            meta.at[symbol, "industry_l1"] = "/".join(boards[symbol])
+            filled += 1
+        if filled:
+            logger.info("industry tags: %d names classified from the 东财 boards "
+                        "(no local lxg industries.csv)", filled)
+        return filled
+
     # ------------------------------------------------------------ status
     def data_status(self) -> Dict[str, object]:
         """Coverage / freshness census for ``qf-screen data-status``."""
@@ -809,5 +1050,31 @@ class CNDataStore:
                 "lxg_income_quarterly": _count("lxg", "income_quarterly.csv"),
                 "ak_research_reports": _count("ak", "research_reports.csv"),
             },
+            "alt_freshness": self._alt_freshness(),
             "warnings": list(self.warnings),
         }
+
+    def _alt_freshness(self) -> Dict[str, Dict[str, object]]:
+        """Per alt kind: file count and the NEWEST source file mtime — the
+        honest signal that an alt download (northbound, margin ...) lags
+        the price files, so change features on it forward-fill stale
+        values.  mtime is a good proxy here because the lxg bulk download
+        rewrites each file when it extends it."""
+        out: Dict[str, Dict[str, object]] = {}
+        for kind in ("mutual_market", "margin", "pledge", "exec_shares_change",
+                     "block_deal", "shareholders_num"):
+            have = self.symbols_with_file("lxg", f"{kind}.csv")
+            newest = 0.0
+            for symbol in have:
+                path = self.lxg.find(self.universe.dir_names(symbol), f"{kind}.csv")
+                if path is not None:
+                    try:
+                        newest = max(newest, path.stat().st_mtime)
+                    except OSError:
+                        continue
+            out[kind] = {
+                "files": len(have),
+                "newest_mtime": pd.Timestamp(newest, unit="s").strftime("%Y-%m-%d")
+                if newest else None,
+            }
+        return out

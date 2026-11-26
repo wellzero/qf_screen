@@ -18,11 +18,18 @@ A preset is a YAML file in this directory (or an absolute path)::
       - {expr: "pct_rank(earnings_yield)", weight: 1.0}
       - {expr: "pct_rank(div_yield_ttm)", weight: 1.0}
     top_n: 30
+    max_per_industry: 5      # optional diversity cap: at most 5 names per industry
 
 Every preset must start from the shared hygiene block (traded, price
 floor, liquidity floor) — :func:`load_preset` enforces it by prepending
 any that are missing, so a preset cannot silently screen penny or
 untradeable names.
+
+A filter may carry ``na_pass: true``: names for which EVERY feature the
+expression mentions is missing (no lxg statements on disk, say) then pass
+instead of fail — "no KNOWN problem" rather than "known fine".  The funnel
+reports how many names each rule could not judge, so the choice is visible
+in every run.
 """
 from __future__ import annotations
 
@@ -88,11 +95,16 @@ def load_preset(name_or_path: str) -> Dict:
     if not isinstance(doc, dict):
         raise PresetError(f"{path}: preset must be a mapping, got "
                           f"{type(doc).__name__}")
-    known = {"name", "description", "universe", "filters", "rank", "top_n", "freq"}
+    known = {"name", "description", "universe", "filters", "rank", "top_n", "freq",
+             "max_per_industry"}
     unknown = set(doc) - known
     if unknown:
         raise PresetError(f"{path}: unknown key(s) {sorted(unknown)} "
                           f"(known: {sorted(known)})")
+    cap = doc.get("max_per_industry")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+        raise PresetError(f"{path}: max_per_industry must be a positive integer, "
+                          f"got {cap!r}")
     if not isinstance(doc.get("filters"), list) or not doc["filters"]:
         raise PresetError(f"{path}: 'filters' must be a non-empty list")
     for i, entry in enumerate(doc["filters"]):

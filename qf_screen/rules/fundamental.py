@@ -13,6 +13,11 @@ disk.  For everyone else these features are NaN, and NaN fails a filter —
 a fundamental screen therefore screens the lxg-covered subset.  The
 engine's funnel makes that visible (pass counts drop at the first
 fundamental filter); ``data-status`` reports the file census.
+
+Like the alt tables, every statement field is a derived WIDE table read
+through the fingerprinted disk cache (:mod:`qf_screen.data.table_cache`):
+a warm run pays one parquet read per field, not the per-symbol parse (the
+cache miss) nor the per-process re-pivot a raw payload cache would cost.
 """
 from __future__ import annotations
 
@@ -22,10 +27,22 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .base import FeaturePanel, Filter, register_feature
+from qf_screen.data import CNDataStore
+
+from .base import (
+    FeaturePanel, Filter, _coalesce, _safe_div, _safe_sub, register_feature,
+)
 from .hygiene import ExprFilter
 
 logger = logging.getLogger(__name__)
+
+#: statement file the finance caches fingerprint -- the lxg bulk download
+#: rewrites it whenever it extends a symbol's statements (the bridge also
+#: reads the balance / cash statements, rewritten in the same download)
+_FINANCE_SOURCE = "income_quarterly.csv"
+
+#: sessions in "a year earlier" for the prior-year base features
+_YEAR_SESSIONS = 252
 
 #: finance-bridge column -> registered feature name
 _FINANCE_FIELDS = {
@@ -48,41 +65,66 @@ _FINANCE_FIELDS = {
 }
 
 
+def _finance_sources(panel: FeaturePanel) -> list:
+    """``(symbol, <income_quarterly.csv>)`` for every loaded symbol that
+    has lxg statement pages -- the parse work list AND the file census the
+    finance fingerprints are built from (memoized on the panel)."""
+    if "_finance_sources" not in panel._cache:
+        store = panel.store
+        found = []
+        for symbol in panel.symbols:
+            path = store.lxg.find(store.universe.dir_names(symbol), _FINANCE_SOURCE)
+            if path is not None:
+                found.append((symbol, path))
+        panel._cache["_finance_sources"] = found
+    return panel._cache["_finance_sources"]
+
+
 def _finance_payload(panel: FeaturePanel) -> dict:
     """Every symbol's finance frame, parsed once and cached (in memory on
-    the panel AND on disk as parquet).
+    the panel; on disk as parquet while the store's cache is on).
+
+    Only a statement-table cache MISS reaches the parse at all -- a warm
+    run reads the per-field step tables (:func:`_finance_steps`) and never
+    comes here.
 
     The lxg bridge costs ~0.17 s per symbol × 765 symbols with statement
-    pages — ~130 s single-threaded, which a screen touching two finance
-    fields would otherwise pay twice per process.  The disk cache makes
-    the parse a once-per-quarter event (invalidated by the newest source
-    file's mtime); parsing runs through :func:`map_workers` (processes
-    when safe, threads otherwise).
+    pages — ~130 s single-threaded.  The disk cache makes the parse a
+    once-per-quarter event (invalidated by the newest source file's mtime);
+    parsing runs through :func:`map_workers` (processes when safe, threads
+    otherwise).
+
+    The payload file is named after the LOADED symbol set (a daily snapshot
+    and a validation window load different names): one shared file made the
+    two modes evict each other's parse, and a validate re-run paid ~15 s
+    to rebuild what the morning's ``run`` had just written.
     """
     payload = panel._cache.get("_finance_payload")
     if payload is not None:
         return payload
     from qf_screen.data._parallel import map_workers
+    from qf_screen.data.table_cache import cache_dir_for
 
     store = panel.store
-    cache_dir = store.data_dir / store.market / "qf_screen_cache"
-    cache_path = cache_dir / "finance_payload.parquet"
-    dirs = {s: store.universe.dir_names(s) for s in panel.symbols}
-    sources = [store.lxg.find(d, "income_quarterly.csv")
-               for d in dirs.values()]
-    sources = [p for p in sources if p is not None]
-    fingerprint = f"{len(sources)}:{max((p.stat().st_mtime for p in sources), default=0):.0f}"
-    payload = _read_finance_cache(cache_path, fingerprint)
+    use_cache = store.use_cache
+    sources = _finance_sources(panel)
+    files = [path for _symbol, path in sources]
+    cache_path = cache_dir_for(store.data_dir, store.market) / (
+        f"finance_payload_{CNDataStore.symbols_key(panel.symbols)}.parquet")
+    fingerprint = f"{len(files)}:{max((p.stat().st_mtime for p in files), default=0):.0f}"
+    payload = _read_finance_cache(cache_path, fingerprint) if use_cache else None
     if payload is None:
-        items = sorted((s, d) for s, d in dirs.items()
-                       if store.lxg.find(d, "income_quarterly.csv") is not None)
+        items = sorted((symbol, store.universe.dir_names(symbol))
+                       for symbol, _path in sources)
         results = map_workers(_load_finance_frame, items, workers=8, chunksize=16,
                               initializer=_finance_worker_init,
                               initargs=(str(store.data_dir), store.market))
         payload = {symbol: frame for symbol, frame in results if frame is not None}
-        _write_finance_cache(cache_path, fingerprint, payload)
-        logger.info("finance payload: parsed %d statement symbols (cache %s)",
-                    len(payload), cache_path)
+        if use_cache:
+            _write_finance_cache(cache_path, fingerprint, payload)
+        logger.info("finance payload: parsed %d statement symbols%s",
+                    len(payload), f" (cache {cache_path})" if use_cache
+                    else " (cache bypassed)")
     else:
         logger.info("finance payload: %d statement symbols from cache %s",
                     len(payload), cache_path)
@@ -182,14 +224,43 @@ def _load_finance_frame(item):
     return symbol, org
 
 
-def _finance_steps(panel: FeaturePanel, field: str) -> pd.DataFrame:
-    """One finance-bridge field as a date x symbol step table (PIT by
-    announcement date; ``NaN`` for symbols without statement pages)."""
+def _finance_steps(panel: FeaturePanel, field: str, name: Optional[str] = None
+                   ) -> pd.DataFrame:
+    """Bridge field ``field`` as a date x symbol step table (PIT by
+    announcement date; ``NaN`` for symbols without statement pages).
+
+    Read through the derived-table disk cache like the alt tables.  A warm
+    run is ONE parquet read per field; without it every process re-pivoted
+    the 764-symbol payload and re-stepped the field (~4 s for the three
+    statement fields ``value_dividend`` touches), which handed back most
+    of what the store cache saves.  The fingerprint covers the statement
+    sources, the calendar bounds, the symbol list and the field.
+
+    ``name`` is the FEATURE the table serves (``roe`` for the bridge's
+    ``return_on_equity``) and names the cache file, so ``qf_screen_cache``
+    reads like the feature registry.
+    """
+    from qf_screen.data.table_cache import cached_wide_table, derived_fingerprint
+
+    store = panel.store
+    files = [path for _symbol, path in _finance_sources(panel)]
+    fp = derived_fingerprint(files, panel.calendar, panel.symbols, extra=field)
+    return cached_wide_table(store.table_cache_dir,
+                             f"finance_step_{name or field}", fp,
+                             lambda: _build_finance_steps(panel, field),
+                             use_cache=store.use_cache)
+
+
+def _build_finance_steps(panel: FeaturePanel, field: str) -> pd.DataFrame:
+    """The uncached build behind :func:`_finance_steps`: every statement
+    symbol's field stepped onto the calendar, assembled into one numpy
+    matrix (no per-column DataFrame insertion)."""
     calendar, symbols = panel.calendar, panel.symbols
-    out = pd.DataFrame(np.nan, index=calendar, columns=symbols, dtype=float)
+    out = np.full((len(calendar), len(symbols)), np.nan)
+    where = {s: i for i, s in enumerate(symbols)}
     filled = 0
     for symbol, frame in _finance_payload(panel).items():
-        if frame is None or field not in frame.columns:
+        if frame is None or field not in frame.columns or symbol not in where:
             continue
         series = frame[field].droplevel(0)
         series = pd.to_numeric(series, errors="coerce")
@@ -197,11 +268,12 @@ def _finance_steps(panel: FeaturePanel, field: str) -> pd.DataFrame:
         series = series[series.index <= calendar[-1]]
         if series.empty:
             continue
-        out[symbol] = series.reindex(calendar, method="ffill")
+        out[:, where[symbol]] = series.reindex(calendar, method="ffill") \
+            .to_numpy(dtype=float)
         filled += 1
     if filled == 0:
         logger.debug("finance field %s: no symbol has data", field)
-    return out
+    return pd.DataFrame(out, index=calendar, columns=symbols)
 
 
 def _div_yield_table(panel: FeaturePanel) -> pd.DataFrame:
@@ -210,45 +282,70 @@ def _div_yield_table(panel: FeaturePanel) -> pd.DataFrame:
     Only ``implemented`` events with an ex-date count (a
     ``board_director_plan`` pays nothing); the sum is taken over ex-dates
     strictly inside the trailing year ending at each row — as-traded, so
-    the engine's one-day shift keeps it causal in schedules.
+    the engine's one-day shift keeps it causal in schedules.  Names whose
+    lxg dividend file the event builder cannot serve (no file, no usable
+    event) fall back to the layout-B ``dyr`` column — lxg's own trailing
+    yield, the same quantity measured by the provider.
+
+    The 1-D ``days`` in the two ``searchsorted`` calls is load-bearing: a
+    ``(N, 1)`` needle makes the cumulative sums broadcast against the
+    per-symbol price and silently divides every row by the FIRST row's
+    price (the v0.1 bug this replaces).
     """
     from qf_screen.data.merged_store import prepare_dividend_events
+    from qf_screen.data.table_cache import cached_wide_table, derived_fingerprint
 
     calendar, symbols = panel.calendar, panel.symbols
-    out = pd.DataFrame(np.nan, index=calendar, columns=symbols, dtype=float)
-    close = panel.store.wide("close_raw").astype(float)
-    for symbol in symbols:
-        raw = panel.store.dividend_events(symbol)
-        events = prepare_dividend_events(raw) if raw is not None else None
-        if events is None or events.empty:
-            continue
-        ex = events["ex_date"].to_numpy().astype("datetime64[D]")
-        cash = events["cash"].to_numpy(dtype=float)
-        order = np.argsort(ex)
-        ex, cash = ex[order], cash[order]
-        keep = cash > 0
-        ex, cash = ex[keep], cash[keep]
-        if ex.size == 0:
-            continue
-        cumulative = np.concatenate([[0.0], np.cumsum(cash)])
+    store = panel.store
+    have = store.symbols_with_file("lxg", "dividend.csv")
+    files = [store.lxg.find(store.universe.dir_names(s), "dividend.csv")
+             for s in have]
+    fp = derived_fingerprint(files, calendar, symbols)
+
+    def build() -> pd.DataFrame:
+        values = np.full((len(calendar), len(symbols)), np.nan)
+        where = {s: i for i, s in enumerate(symbols)}
+        close = store.wide("close_raw").astype(float)
         days = calendar.to_numpy().astype("datetime64[D]")
-        hi = np.searchsorted(ex, days[:, None], side="right")
-        lo = np.searchsorted(ex, (days[:, None] - np.timedelta64(365, "D")),
-                             side="right")
-        trailing = cumulative[hi] - cumulative[lo]
-        price = close[symbol].to_numpy(dtype=float)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            out[symbol] = np.where(price > 0, trailing / price, np.nan)
-    return out
+        for symbol in have:                      # skip the ~3,000 bare dirs
+            raw = store.dividend_events(symbol)
+            events = prepare_dividend_events(raw) if raw is not None else None
+            if events is None or events.empty or symbol not in where:
+                continue
+            ex = events["ex_date"].to_numpy().astype("datetime64[D]")
+            cash = events["cash"].to_numpy(dtype=float)
+            order = np.argsort(ex)
+            ex, cash = ex[order], cash[order]
+            keep = cash > 0
+            ex, cash = ex[keep], cash[keep]
+            if ex.size == 0:
+                continue
+            cumulative = np.concatenate([[0.0], np.cumsum(cash)])
+            hi = np.searchsorted(ex, days, side="right")
+            lo = np.searchsorted(ex, days - np.timedelta64(365, "D"), side="right")
+            trailing = cumulative[hi] - cumulative[lo]
+            price = close[symbol].to_numpy(dtype=float)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                values[:, where[symbol]] = np.where(price > 0, trailing / price, np.nan)
+        return pd.DataFrame(values, index=calendar, columns=symbols)
+
+    events_yield = cached_wide_table(
+        store.table_cache_dir, "div_yield_ttm_events", fp,
+        build, use_cache=store.use_cache)
+    dyr = store.wide("dyr").astype(float)
+    if events_yield.size and dyr.notna().any().any():
+        return _coalesce(events_yield, dyr)
+    return events_yield
 
 
 def register_fundamental_features() -> None:
     for column, name in _FINANCE_FIELDS.items():
         register_feature(
-            name, (lambda p, c=column: _finance_steps(p, c)),
+            name, (lambda p, c=column, n=name: _finance_steps(p, c, n)),
             f"lxg TTM statement field {column!r}, PIT by statutory announce "
             "date (NaN without lxg statements)", kind="table", replace=True)
-    register_feature("fcf_ttm", lambda p: p.table("ocf_ttm") - p.table("capex_ttm"),
+    register_feature("fcf_ttm", lambda p: _safe_sub(p.table("ocf_ttm"),
+                                                    p.table("capex_ttm")),
                      "free cash flow = ocf_ttm - capex_ttm", kind="table")
     register_feature("debt_assets", lambda p: _ratio(p, "liabilities", "assets"),
                      "total liabilities / total assets", kind="table")
@@ -257,13 +354,56 @@ def register_fundamental_features() -> None:
     register_feature("fcf_yield", lambda p: _ratio(p, "fcf_ttm", "market_cap"),
                      "free cash flow / market cap", kind="table")
     register_feature("div_yield_ttm", _div_yield_table,
-                     "trailing-365d cash dividends per share / unadjusted close",
+                     "trailing-365d cash dividends per share / unadjusted close "
+                     "(lxg dyr fallback where no dividend file serves)",
+                     kind="table")
+    register_feature("dyr", lambda p: p.store.wide("dyr").astype(float),
+                     "lxg layout-B trailing dividend yield (fraction; the "
+                     "div_yield_ttm fallback source)", kind="table")
+    # ---- full-market coverage features -------------------------------
+    def roe_implied(panel: FeaturePanel) -> pd.DataFrame:
+        """pb / pe_ttm == E/B: the ROE a valuation pair implies.  Both legs
+        come from the merged wide tables, so coverage is the FULL market
+        (~5,200 names) rather than the ~765 statement symbols; loss-makers
+        (pe < 0) and missing legs stay NaN — a negative implied ROE must
+        not pass a quality filter."""
+        pb = panel.store.wide("pb").astype(float)
+        pe = panel.store.wide("pe_ttm").astype(float)
+        return _safe_div(pb.where(pb > 0), pe.where(pe > 0))
+
+    register_feature("roe_implied", roe_implied,
+                     "implied ROE = pb / pe_ttm (full-market coverage; "
+                     "loss-makers stay NaN)", kind="table")
+    register_feature(
+        "roe_best",
+        lambda p: _coalesce(p.table("roe"), p.table("roe_implied")),
+        "statement roe with the full-market roe_implied fallback (best "
+        "available ROE per name)", kind="table")
+    register_feature(
+        "net_margin_py",
+        lambda p: _safe_div(p.table("profit_ttm").shift(_YEAR_SESSIONS),
+                            p.table("revenue_ttm").shift(_YEAR_SESSIONS)),
+        "net margin of the TTM report that was known a year (252 sessions) "
+        "earlier -- the base the current growth is measured against; a thin "
+        "prior-year margin flags growth off a near-zero base (NaN without "
+        "lxg statements)", kind="table")
+    # readable-unit companions (CLI formatting is nicer on these)
+    register_feature("market_cap_bn",
+                     lambda p: _safe_div(p.store.wide("market_cap").astype(float),
+                                         1e8),
+                     "total market cap (亿元 = 1e8 CNY)", kind="table")
+    register_feature("float_market_cap_bn",
+                     lambda p: _safe_div(p.store.wide("float_market_cap").astype(float),
+                                         1e8),
+                     "float market cap (亿元 = 1e8 CNY)", kind="table")
+    register_feature("amount_ma20_mn",
+                     lambda p: _safe_div(p.table("amount_ma20"), 1e6),
+                     "trailing 20d mean traded value (百万元 = 1e6 CNY)",
                      kind="table")
 
 
 def _ratio(panel: FeaturePanel, num: str, den: str) -> pd.DataFrame:
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return panel.table(num) / panel.table(den)
+    return _safe_div(panel.table(num), panel.table(den))
 
 
 # ------------------------------------------------------------ filters

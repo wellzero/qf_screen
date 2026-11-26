@@ -5,7 +5,7 @@ the data does not pass.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,8 @@ class ExprFilter(Filter):
     With ``na_pass=True`` a name passes when EVERY feature the expression
     mentions is missing for it (the rule explicitly declines to judge);
     with the default ``na_pass=False`` missing data fails the filter.
+    Either way :meth:`evaluate` also reports WHICH names the rule could not
+    judge, and the engine's funnel shows the count per rule.
     """
 
     def __init__(self, name: str, expr: str, description: str = "",
@@ -30,28 +32,46 @@ class ExprFilter(Filter):
         self.expr = expr
         self.na_pass = bool(na_pass)
         self.features = expr_names(expr)
-        unknown = [f for f in self.features if f not in _known_features()]
+        unknown = [f for f in self.features
+                   if f not in _known_features() and not _is_dynamic(f)]
         if unknown:
             from .base import feature_names
             raise ValueError(f"filter {name!r} references unknown feature(s) "
-                             f"{unknown}; known: {', '.join(feature_names())}")
+                             f"{unknown}; known: {', '.join(feature_names())} "
+                             '(or factor_<family>__<column>)')
         self._fn = compile_bool(expr)
 
-    def passes(self, panel: FeaturePanel, pos: int) -> np.ndarray:
+    def evaluate(self, panel: FeaturePanel, pos: int
+                 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """``(passed, unknown)``.
+
+        ``unknown`` is the mask of names for which EVERY feature the
+        expression mentions is missing — the names the rule cannot judge
+        (no lxg statements on disk, say).  With ``na_pass`` those names are
+        added to the verdict; either way the funnel reports how many they
+        are, so a screen that quietly steps aside for three quarters of the
+        market says so.
+        """
         env = panel.env(pos, self.features)
         out = self._fn(env).astype(bool)
-        if self.na_pass and self.features:
-            unknown = np.ones(len(out), dtype=bool)
-            for name in self.features:
-                value = env.get(name)
-                if value is None:
-                    continue
-                if value.dtype == object:      # categorical: missing = ""
-                    unknown &= pd.isna(value) | (value == "")
-                else:
-                    unknown &= ~np.isfinite(value)
+        unknown: Optional[np.ndarray] = None
+        for name in self.features:
+            value = env.get(name)
+            if value is None:
+                continue
+            if value.dtype == bool:            # a flag is never "missing"
+                missing = np.zeros(len(out), dtype=bool)
+            elif value.dtype == object:       # categorical: missing = ""
+                missing = pd.isna(value) | (value == "")
+            else:
+                missing = ~np.isfinite(value)
+            unknown = missing if unknown is None else (unknown & missing)
+        if unknown is not None and self.na_pass:
             out = out | unknown
-        return out
+        return out, unknown
+
+    def passes(self, panel: FeaturePanel, pos: int) -> np.ndarray:
+        return self.evaluate(panel, pos)[0]
 
     def __repr__(self) -> str:
         return f"<ExprFilter {self.name}: {self.expr}>"
@@ -60,6 +80,11 @@ class ExprFilter(Filter):
 def _known_features() -> frozenset:
     from .base import FEATURES
     return frozenset(FEATURES)
+
+
+def _is_dynamic(name: str) -> bool:
+    from .base import is_dynamic_feature
+    return is_dynamic_feature(name)
 
 
 class BoardFilter(Filter):
@@ -73,6 +98,24 @@ class BoardFilter(Filter):
     def passes(self, panel: FeaturePanel, pos: int) -> np.ndarray:
         board = panel.table("board").iloc[:, 0].reindex(panel.symbols).to_numpy()
         return np.isin(board.astype(str), np.array(self.boards, dtype=object))
+
+
+class SymbolSetFilter(Filter):
+    """Restrict membership to an explicit symbol set (the universe-level
+    ``symbols:`` knob, and the CLI's ``--industry`` / ``--concept`` board
+    restriction).  Names outside the set fail THIS rule only — the funnel
+    shows the restriction as its own step, and cross-sectional features
+    still rank against the full loaded market."""
+
+    def __init__(self, symbols, name: str = "symbols"):
+        self.allowed = frozenset(symbols)
+        label = f"{len(self.allowed)} names" if len(self.allowed) > 3 \
+            else "+".join(sorted(self.allowed)) or "none"
+        super().__init__(name, f"restricted to {label}")
+
+    def passes(self, panel: FeaturePanel, pos: int) -> np.ndarray:
+        return np.fromiter((s in self.allowed for s in panel.symbols),
+                           dtype=bool, count=len(panel.symbols))
 
 
 class NotSuspended(Filter):
@@ -111,6 +154,11 @@ def register_hygiene_features() -> None:
         "industry_l2", _static_column("industry_l2"),
         "申万 2021 second-level industry (static)", kind="static")
     register_feature(
+        "financial", _financial_flag,
+        "1 for a bank / securities firm / insurer / other financial company "
+        "per the company list (fsTableType), 0 for everyone else, NaN for a "
+        "name the list does not carry (static)", kind="static")
+    register_feature(
         "listed_days", _listed_days,
         "calendar days since listing (IPO date, else first stored bar)",
         kind="table")
@@ -121,14 +169,41 @@ def register_hygiene_features() -> None:
 
 
 def _static_column(column: str):
+    """A census text column as a static feature.  A name the census does not
+    classify stays MISSING (NaN in the object column) -- ``astype(str)``
+    used to turn that into the text ``"nan"``, which then ranked as an
+    industry of its own in ``industry_rank`` and counted against an
+    industry cap."""
     def build(panel: FeaturePanel) -> pd.DataFrame:
         values = panel.store.universe.meta.get(column)
         if values is None:
-            return pd.DataFrame({column: [""] * len(panel.symbols)},
+            return pd.DataFrame({column: [None] * len(panel.symbols)},
                                 index=panel.symbols)
-        text = values.reindex(panel.symbols).astype(str)
+        text = values.reindex(panel.symbols).astype(object)
+        text = text.where(text.notna(), None).map(lambda v: v if isinstance(v, str) else v)
         return text.to_frame(column)
     return build
+
+
+#: ``fsTableType`` values of the company list that mark a financial company
+#: (whose balance sheet is levered by construction: a ratio rule written
+#: for an industrial company says nothing about it)
+_FINANCIAL_TYPES = frozenset({"bank", "security", "insurance", "other_financial"})
+
+
+def _financial_flag(panel: FeaturePanel) -> pd.DataFrame:
+    meta = panel.store.universe.meta
+    if "fs_type" not in meta.columns:
+        return pd.DataFrame({"financial": np.full(len(panel.symbols), np.nan)},
+                            index=panel.symbols)
+    kinds = meta["fs_type"].reindex(panel.symbols)
+    flag = pd.Series(np.nan, index=panel.symbols, dtype=float)
+    text = kinds.astype(object).where(kinds.notna(), None)
+    is_text = text.map(lambda value: isinstance(value, str) and value.strip() != "")
+    known = is_text[is_text].index
+    flag.loc[known] = text.loc[known].map(
+        lambda value: 1.0 if str(value).strip().lower() in _FINANCIAL_TYPES else 0.0)
+    return flag.to_frame("financial")
 
 
 def _listed_days(panel: FeaturePanel) -> pd.DataFrame:

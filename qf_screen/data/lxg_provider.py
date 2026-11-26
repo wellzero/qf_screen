@@ -31,6 +31,7 @@ missing.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -107,14 +108,19 @@ class LxgProvider:
         self.market = market
         self.root = self.data_dir / market / EQUITY_DIR
         self.list_path = self.data_dir / market / PROVIDER_LXG / "company_list.csv"
+        #: ``<root>/`` as a string prefix: :meth:`find` is called thousands
+        #: of times per run (the file censuses behind every cache), and
+        #: ``os.path.exists`` on a joined string costs a third of pathlib
+        self._base = f"{self.root}{os.sep}"
 
     # ------------------------------------------------------------ paths
     def find(self, dirs: Sequence[str], filename: str) -> Optional[Path]:
         """First existing ``<dir>/lxg/<filename>`` over a symbol's aliases."""
+        base = self._base
         for name in dirs:
-            path = self.root / name / PROVIDER_LXG / filename
-            if path.exists():
-                return path
+            path = f"{base}{name}{os.sep}{PROVIDER_LXG}{os.sep}{filename}"
+            if os.path.exists(path):
+                return Path(path)
         return None
 
     def read(self, dirs: Sequence[str], name: str, **kw) -> Optional[pd.DataFrame]:
@@ -234,6 +240,38 @@ class LxgProvider:
         out = pd.Series(ratio.to_numpy(dtype=float), index=pd.DatetimeIndex(frame["date"]))
         out = out.dropna()
         return out[~out.index.duplicated(keep="last")].sort_index() if len(out) else None
+
+    # --------------------------------------------------------------- index
+    def index_close(self, code: str) -> Optional[pd.Series]:
+        """Daily close of an index from ``index/<DIR>/lxg/daily.csv`` — the
+        lxg provider tree of ``cn/index`` — or ``None`` when the store has
+        no such file.
+
+        ``code`` is the bare code (``"000300"``, ``"399006"``) or the
+        directory name (``"SH000300"``).  A bare ``000…`` code is a 沪市
+        index and ``399…`` a 深市 one, as in the store's own naming;
+        ``<code>.SH`` / ``<code>.SZ`` spellings are tried as well.  Only
+        ``close`` is read; this is a benchmark series, not a screen input.
+        """
+        code = str(code).strip().upper()
+        if len(code) == 6 and code.isdigit():
+            prefixed = ("SZ" if code.startswith("399") else "SH") + code
+            names = [prefixed, code, f"{code}.SH", f"{code}.SZ"]
+        else:
+            names = [code]
+        for name in names:
+            path = self.data_dir / self.market / "index" / name / PROVIDER_LXG / "daily.csv"
+            arrays = read_csv_typed(read_bytes(path),
+                                    (_DATE, ColumnSpec("close")))
+            if "date" not in arrays or "close" not in arrays:
+                continue
+            keep = ~pd.isna(arrays["date"]) & np.isfinite(arrays["close"])
+            if not keep.any():
+                continue
+            series = pd.Series(arrays["close"][keep].astype(float),
+                               index=pd.DatetimeIndex(arrays["date"][keep].astype("datetime64[ns]")))
+            return series[~series.index.duplicated(keep="last")].sort_index()
+        return None
 
 
 __all__ = ["LXG_FILES", "LxgProvider"]
