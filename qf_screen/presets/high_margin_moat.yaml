@@ -1,0 +1,29 @@
+name: high_margin_moat
+description: >
+  Pricing-power leaders: gross margin at least 40% (customers pay well
+  over cost), operating margin at least 15% (the advantage survives the
+  cost of running the business), statement ROE above 12% and positive
+  operating cash flow.  Margin and ROE legs are lxg statement features
+  (~765 names); on the 2026-11 store 71 names clear the gross-margin bar
+  and 195 the operating one.  Ranked by the two margins with an ROE
+  tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: gross,     expr: "gross_margin >= 0.40"}
+  - {name: operating, expr: "op_margin >= 0.15"}
+  - {name: roe,       expr: "roe > 0.12"}
+  - {name: cash,      expr: "ocf_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(gross_margin)", weight: 1.0}
+  - {expr: "pct_rank(op_margin)",    weight: 1.0}
+  - {expr: "pct_rank(roe)",          weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

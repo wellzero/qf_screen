@@ -1,0 +1,29 @@
+name: institutional_block_value
+description: >
+  Block-deal interest at a sane price: block trades in the trailing 180
+  days at a mean discount inside +/-10% (551 of the 663 names with a
+  deal carry that -- a deep discount flags distressed placement, a
+  premium flags conviction buying), on names that are profitable
+  (roe_best > 10%), reasonably priced (positive P/E under 30) and at
+  least within 5% of the 200-day mean.  NaN (no deals) fails: this
+  screen wants the institutional footprint, not the absence of one.
+  Ranked quality + cheapness.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: blocks,    expr: "block_discount_180d > -0.10 and block_discount_180d < 0.10"}
+  - {name: quality,   expr: "roe_best > 0.10"}
+  - {name: value,     expr: "pe_ttm > 0 and pe_ttm < 30"}
+  - {name: not_falling, expr: "ma_ratio_200 > 0.95"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+
+top_n: 20
+max_per_industry: 4

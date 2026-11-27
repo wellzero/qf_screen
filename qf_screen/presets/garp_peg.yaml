@@ -1,0 +1,27 @@
+name: garp_peg
+description: >
+  Peter Lynch growth at a reasonable price: a positive PEG under 1.2
+  (growth paid for at less than its dollar), a positive P/E under 35 so
+  the ratio cannot be gamed by a tiny denominator, and an implied-or-
+  statement ROE floor of 10% so the growth is earned on real equity.
+  peg is a full-market vendor snapshot (negative where growth is
+  negative -- the P/E leg plus `peg > 0` keeps those out).  Ranked by
+  inverse PEG with a quality tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: peg,     expr: "peg > 0 and peg < 1.2"}
+  - {name: price,   expr: "pe_ttm > 0 and pe_ttm < 35"}
+  - {name: quality, expr: "roe_best > 0.10"}
+
+rank:
+  - {expr: "pct_rank(1 / peg)",   weight: 1.0}
+  - {expr: "pct_rank(roe_best)",  weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

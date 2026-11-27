@@ -1,0 +1,38 @@
+name: left_side_accumulation
+description: >
+  Step 1 of the Undervalued + Tailwind playbook -- the patient
+  base-position list, built while the catalyst is still absent.  Deep
+  value (positive P/E under 15, book under 1.5x), a going-concern
+  floor (roe_best > 6%), and a paid cushion (trailing yield at least
+  2.5% -- the framework's 4-5% ideal would empty the list on this
+  tape; the median hygiene name pays 1.0%).  Stabilization, not
+  trend: the last quarter out of freefall (ret_63d > -15%, 3-1
+  momentum > -10%) and statement profit not collapsing
+  (profit_growth > -30%, na_pass).  What it deliberately does NOT
+  ask for is any confirmation leg -- volume, momentum and the
+  reclaimed 60-day mean are undervalued_tailwind's job once they
+  arrive; this list is what you watch so you already own the names
+  when they do.  2026-11-27 tape: 232 cheap -> 99 payers -> 73
+  stable.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: deep_value,  expr: "pe_ttm > 0 and pe_ttm < 15"}
+  - {name: cheap_book,  expr: "pb > 0 and pb < 1.5"}
+  - {name: floor,       expr: "roe_best > 0.06"}
+  - {name: cushion,     expr: "div_yield_ttm >= 0.025"}
+  - {name: stabilizing, expr: "ret_63d > -0.15 and mom_63s21 > -0.10"}
+  - {name: no_collapse, expr: "profit_growth > -0.30", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(div_yield_ttm)",  weight: 0.75}
+  - {expr: "pct_rank(-vol_120d)",      weight: 0.5}
+
+top_n: 30
+max_per_industry: 5

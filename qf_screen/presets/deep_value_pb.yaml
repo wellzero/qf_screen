@@ -1,0 +1,34 @@
+name: deep_value_pb
+description: >
+  Deep-value non-financial bargains on the whole A-share universe: price
+  below 1.2 times book AND a positive trailing P/E under 15, with an
+  implied-or-statement ROE above 6% (roe_best: statement ROE where lxg
+  pages exist, the pb/pe-implied ROE everywhere else) so a cheap multiple
+  still reflects a going concern, not a melting one.  Financials are kept
+  out explicitly (a bank's P/B is not an industrial bargain), and the
+  balance leg declines to judge names without statements (na_pass) rather
+  than shrinking the screen to the ~765-name statement subset.  Ranked by
+  earnings yield with a quality tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: cheap_book,  expr: "pb > 0 and pb < 1.2"}
+  - {name: cheap_earn,  expr: "pe_ttm > 0 and pe_ttm < 15"}
+  - {name: profitable,  expr: "roe_best > 0.06"}
+  - {name: not_financial, expr: "fillna(financial, 0) < 0.5"}
+  # leverage is knowable only where lxg statements exist (~765 names);
+  # elsewhere the rule declines to judge (na_pass)
+  - {name: balance,     expr: "debt_assets < 0.7", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)",       weight: 0.5}
+  - {expr: "pct_rank(div_yield_ttm)",  weight: 0.5}
+
+top_n: 30
+max_per_industry: 5

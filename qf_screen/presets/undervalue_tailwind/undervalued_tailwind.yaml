@@ -1,0 +1,40 @@
+name: undervalued_tailwind
+description: >
+  The Undervalued + Tailwind core (低估值+顺风): a margin of safety
+  that something has started to happen to.  The value floor sets the
+  odds -- a positive P/E under 25, book under 2.5x, and an implied-or-
+  statement ROE above 8% (roe_best, full market) so the cheapness is a
+  going concern, with a no-collapse guard on statement profit growth
+  (profit_growth > -10%, na_pass: names without lxg pages decline to
+  be judged).  The tailwind sets the timing -- 3-1 momentum positive,
+  price back above its 60-day mean, and 20-day participation at least
+  equal to the 60-day (amount_ma20 >= amount_ma60): the market
+  re-rating an ignored cheap name, on volume, not on a story.  The
+  engine holds no per-name valuation history, so the framework's "own
+  30th percentile" ideal is proxied by absolute multiple floors.
+  2026-11-27 drawdown tape: 582 cheap -> 387 with the quality floor ->
+  61 with all three confirmation legs -> 59 after the growth guard.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: cheap,       expr: "pe_ttm > 0 and pe_ttm < 25"}
+  - {name: cheap_book,  expr: "pb > 0 and pb < 2.5"}
+  - {name: floor,       expr: "roe_best > 0.08"}
+  - {name: turning,     expr: "mom_63s21 > 0"}
+  - {name: trend,       expr: "ma_ratio_60 > 1"}
+  - {name: volume,      expr: "amount_ma20 >= amount_ma60"}
+  - {name: no_collapse, expr: "profit_growth > -0.10", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)",            weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",                 weight: 0.75}
+  - {expr: "pct_rank(amount_ma20 / amount_ma60)", weight: 0.5}
+  - {expr: "pct_rank(roe_best)",                  weight: 0.25}
+
+top_n: 30
+max_per_industry: 4

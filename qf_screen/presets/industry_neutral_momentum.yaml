@@ -1,0 +1,28 @@
+name: industry_neutral_momentum
+description: >
+  Winners FOR THEIR SECTOR: in the top 25% of its 申万 first-level
+  industry by 6-1 momentum, with the price above the 200-day mean and
+  no lottery top decile -- momentum neutralized against the sector
+  rotation of the tape, so the screen buys relative strength rather
+  than whatever sector is hot.  industry_rank is NaN for unclassified
+  names and fails them; the industry cap of 3 enforces the same
+  neutrality on the final list.  Ranked industry-relative momentum +
+  nearness to the 52-week high.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: rel_mom,     expr: "industry_rank(mom_126s21) >= 0.75"}
+  - {name: trend,       expr: "ma_ratio_200 > 1"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "industry_rank(mom_126s21)",   weight: 1.0}
+  - {expr: "industry_rank(high252_ratio)", weight: 0.5}
+
+top_n: 30
+max_per_industry: 3

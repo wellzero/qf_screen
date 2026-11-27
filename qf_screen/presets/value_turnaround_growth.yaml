@@ -1,0 +1,27 @@
+name: value_turnaround_growth
+description: >
+  Cheap growth turning: a positive P/E under 20, a positive PEG under
+  1.0, and positive 3-1 momentum (the last month skipped) so the market
+  has begun to pay for the growth rather than only the screen believing
+  in it.  Full-market features (pe/peg vendor snapshots, momentum from
+  the rebuilt adjusted close).  Ranked by inverse PEG with momentum and
+  cheapness tilts.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: cheap,    expr: "pe_ttm > 0 and pe_ttm < 20"}
+  - {name: growth,   expr: "peg > 0 and peg < 1.0"}
+  - {name: turning,  expr: "mom_63s21 > 0"}
+
+rank:
+  - {expr: "pct_rank(1 / peg)",        weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",      weight: 0.5}
+  - {expr: "pct_rank(earnings_yield)", weight: 0.5}
+
+top_n: 30
+max_per_industry: 5

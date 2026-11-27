@@ -1,0 +1,29 @@
+name: hyper_growth_revenue
+description: >
+  High top-line growers: TTM revenue growth above 25% AND profit growth
+  above 15%, measured against a base that already earned a 5% net margin
+  (net_margin_py -- the base-effect guard that keeps 2,000%-off-a-thin-
+  base turnarounds out of a growth screen), with positive operating cash
+  flow so the growth converts.  All growth legs are lxg statement
+  features (~765 names; 151 clear the revenue bar on the 2026-11
+  store).  Growth ranks are capped at +/-100%.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: growth,  expr: "rev_growth > 0.25 and profit_growth > 0.15"}
+  - {name: base,    expr: "net_margin_py >= 0.05"}
+  - {name: cash,    expr: "ocf_ttm > 0"}
+  - {name: price,   expr: "pe_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(clip(rev_growth, -1, 1))",    weight: 1.0}
+  - {expr: "pct_rank(clip(profit_growth, -1, 1))", weight: 1.0}
+  - {expr: "pct_rank(roe)",                        weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

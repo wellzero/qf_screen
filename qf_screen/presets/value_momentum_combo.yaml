@@ -1,0 +1,28 @@
+name: value_momentum_combo
+description: >
+  The Asness barbell: cheap (positive P/E under 20, under 3x book) AND
+  winning (positive 6-1 momentum, above the 200-day mean) -- the two
+  styles that hate each other, held together so neither leg's bad
+  decade owns the book.  The rank blends the two equally; the industry
+  cap of 5 keeps the value leg from becoming one sector's value trap.
+  In a drawdown the momentum leg binds (633 names above 0 on mom_126s21
+  in the 2026-11 tape) and the value leg picks among them.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: cheap,    expr: "pe_ttm > 0 and pe_ttm < 20"}
+  - {name: cheap_book, expr: "pb > 0 and pb < 3"}
+  - {name: winning,  expr: "mom_126s21 > 0"}
+  - {name: trend,    expr: "ma_ratio_200 > 1"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(mom_126s21)",     weight: 1.0}
+
+top_n: 30
+max_per_industry: 5

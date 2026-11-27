@@ -1,0 +1,26 @@
+name: volume_expansion_trend
+description: >
+  Volume-confirmed trends: the 20-day mean traded value at least 25%
+  above the 60-day mean (participation expanding) while price holds
+  above both its 20- and 60-day means.  Volume expansion is the classic
+  confirmation leg -- a move on shrinking volume is exit liquidity, not
+  entry signal.  Ratios are unit-free (CNY / CNY).  Ranked by the
+  expansion ratio with a momentum tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: expansion, expr: "amount_ma20 > amount_ma60 * 1.25"}
+  - {name: trend,     expr: "ma_ratio_20 > 1 and ma_ratio_60 > 1"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(amount_ma20 / amount_ma60)", weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",                 weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

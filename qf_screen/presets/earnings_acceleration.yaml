@@ -1,0 +1,28 @@
+name: earnings_acceleration
+description: >
+  Operating leverage in action: profit growth above 20% on revenue
+  growth above 10% AND faster than the revenue (profit_growth >
+  rev_growth -- margins expanding as the top line grows), backed by
+  positive operating cash flow.  Statement features throughout (the
+  ~765-name subset; 117 names clear the acceleration condition on the
+  2026-11 store).  Ranked by the growth EXCESS (capped) first, revenue
+  growth second.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: profits,     expr: "profit_growth > 0.20"}
+  - {name: revenue,     expr: "rev_growth > 0.10"}
+  - {name: leverage,    expr: "profit_growth > rev_growth"}
+  - {name: cash,        expr: "ocf_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(clip(profit_growth - rev_growth, -1, 1))", weight: 1.0}
+  - {expr: "pct_rank(clip(rev_growth, -1, 1))",                 weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

@@ -390,13 +390,111 @@ conservatively.
 
 ## Presets
 
+54 built-ins across 9 strategy families (added 2026-11-27, calibrated on the
+real store — see `doc/plan/PLAN_presets.md`).  **Statement features**
+(`roe`, `ocf_ttm`, margins, growth …) cover only the ~765 names with lxg
+statement pages: presets marked *stmt* screen that subset by design; *na_pass*
+marks legs that decline to judge names without the data instead of failing
+them.
+
+**Value & income**
+
 | name | thesis | legs |
 |---|---|---|
 | `value_dividend` | cheap, profitable, low-levered payers | P/E<15, ROE>12% (`roe_best`, full market), debt<60% where statements exist (na_pass; financials excluded), yield≥3% |
-| `quality_growth` | profitable growers at a reasonable price | rev/profit growth>15% off a base with ≥8% prior-year margin, OCF>0, ROE>12%, GM>20%, debt<60%, P/E<40; growth capped at ±100% for ranking |
+| `deep_value_pb` | non-financial bargains | P/B<1.2, P/E<15, `roe_best`>6%, debt<70% (na_pass) |
+| `fcf_cash_cow` | *stmt* high free-cash-flow yield | FCF yield≥4%, OCF≥80% of profit, debt<60% |
+| `magic_formula` | *stmt* Greenblatt | rank ROA + earnings yield equally; OCF>0, ROA>2% |
+| `high_dividend_yield` | main-board income | yield≥4.5%, P/E<20, low-vol tilt, debt<70% (na_pass) |
+| `dividend_growth_quality` | payers compounding | yield≥2.5%, `roe_best`>12%; growth/debt legs na_pass |
+| `low_ps_sales_value` | cheap sales, profitable | P/S<1.5, P/E<25, `roe_best`>5%, ≥90% of 200d MA |
+| `low_pcf_cash_value` | cheap operating cash | P/CF<15, `roe_best`>10%, non-financial, ≥70% of 52w high |
+
+**Quality & financial strength**
+
+| name | thesis | legs |
+|---|---|---|
+| `quality_growth` | *stmt* profitable growers at a reasonable price | rev/profit growth>15% off a base with ≥8% prior-year margin, OCF>0, ROE>12%, GM>20%, debt<60%, P/E<40; growth capped at ±100% for ranking |
+| `high_roe_compounders` | *stmt* durable moats | ROE>15%, GM>30%, NM>10%, OCF>0, debt<60%, P/E<45 |
+| `net_cash_fortress` | *stmt* cash-rich balance sheets | cash/assets≥25%, debt<40%, OCF>0 |
+| `high_margin_moat` | *stmt* pricing power | GM≥40%, OM≥15%, ROE>12%, OCF>0 |
+| `cash_earnings_quality` | *stmt* low-accrual earners | OCF≥profit, FCF>0, ROE>10% |
+| `quality_at_reasonable_price` | full-market QARP | `roe_best`>14%, P/E<22, P/B<4, ≥95% of 200d MA |
+| `financial_blue_chips` | banks/brokers/insurers | `financial`>0.5, P/E<10, P/B<1.5, yield≥3% |
+
+**Growth & GARP**
+
+| name | thesis | legs |
+|---|---|---|
+| `garp_peg` | Lynch GARP | 0<PEG<1.2, P/E<35, `roe_best`>10% |
+| `hyper_growth_revenue` | *stmt* real-base top-line growth | rev>25%, profit>15%, prior-year margin≥5%, OCF>0 |
+| `earnings_acceleration` | *stmt* operating leverage | profit>20%, rev>10%, profit>rev, OCF>0 |
+| `growth_momentum` | CANSLIM growth + price | growth>15% (na_pass), >60d MA, ≥75% of 52w high |
+| `value_turnaround_growth` | cheap growth turning | P/E<20, 0<PEG<1.0, 3-1 momentum>0 |
+
+**Technical, momentum & breakout**
+
+| name | thesis | legs |
+|---|---|---|
 | `momentum_trend` | the classic price/volume stack | >200d MA, 6-1 momentum, near 52w high, low vol, not lottery |
-| `low_vol_defensive` | the low-risk anomaly | bottom-third vol, no lottery, drawdown guard, debt<70% (na_pass) |
-| `smart_money_ashare` | smart-money confirmation | margin↑, analyst buys, no pledge overhang, insiders not selling, >60d MA; northbound confirms while the data lives (na_pass since the 2026-09 disclosure stop) |
+| `breakout_52w_high` | George–Hwang | ≥90% of 52w high, above 20/60/200d MAs, not lottery |
+| `long_term_momentum_12m` | 12-1 momentum | mom_252s21>15%, >200d MA, low vol, not lottery |
+| `short_term_momentum_3m` | fast 3-1 momentum | mom_63s21>5%, >20/60d MAs, turnover≤15% |
+| `steady_uptrend_low_vol` | risk-adjusted uptrend | above 20/60/200d MAs; rank mom/vol |
+| `volume_expansion_trend` | volume-confirmed trend | amount_ma20>1.25×amount_ma60, >20/60d MAs |
+| `low_turnover_neglected` | neglected-name effect | bottom-35% turnover, P/E<25, `roe_best`>8%; Amihud rank tilt |
+| `volatility_compression` | quiet before the move | vol_20d<0.75×vol_120d, >60/200d MAs, ≥60% of 52w high |
+
+**Mean reversion & pullback**
+
+| name | thesis | legs |
+|---|---|---|
+| `uptrend_pullback` | dip in an uptrend | >103% of 200d MA, −15%<ret_21d<0, `roe_best`>8% |
+| `short_term_reversal_quality` | oversold quality bounce | −25%<ret_21d<−5%, `roe_best`>12%, P/E<25 |
+| `deep_oversold_value` | contrarian value | ret_126d<−10%, P/E<15, P/B<1.8, yield≥2% |
+| `quiet_pullback_low_vol` | calm dip | bottom-35% vol, >200d MA, <20d MA |
+
+**Size & board-specific**
+
+| name | thesis | legs |
+|---|---|---|
+| `small_cap_value` | 20–100亿 value | P/E<20, P/B<2.5, `roe_best`>8% |
+| `small_cap_quality_momentum` | 20–120亿 quality+trend | `roe_best`>10%, mom_63s21>0, >60d MA |
+| `mid_cap_core_growth` | 100–500亿 core | `roe_best`>12%, P/E<30, >200d MA |
+| `large_cap_blue_chip` | ≥500亿 income core | `roe_best`>12%, yield≥2%, low vol, ≥3亿/day |
+| `chinext_growth_leaders` | ChiNext leaders | `roe_best`>10%, P/E<60, growth (na_pass), >60d MA |
+| `star_tech_leaders` | STAR hard-tech | `roe_best`>8%, P/E<80, GM>30% (na_pass), >60d MA |
+| `bj_emerging_leaders` | Beijing board | `roe_best`>8%, P/E<40 — **data-limited**: the default lxg+ak merge prices ~1 BJ name, so membership is 0–1 until BJ daily data lands |
+
+**A-share alt / smart money & governance**
+
+| name | thesis | legs |
+|---|---|---|
+| `smart_money_ashare` | smart-money confirmation | margin↑, analyst buys, no pledge overhang, insiders not selling, >60d MA; northbound confirms while the data lives (na_pass since the 2026-09 disclosure stop) — **data-limited** in deep drawdowns |
+| `chip_concentration` | chips consolidating | holder count −5%, >60d MA, pledge<20% (na_pass) |
+| `analyst_consensus_buy` | sell-side conviction | ≥2 reports/90d, ≥80% 买入/增持, `roe_best`>8% |
+| `margin_momentum_ashare` | leveraged money leaning in | margin balance +5%/20d, >20/60d MAs, pledge<20% (na_pass) |
+| `clean_governance_insider` | clean names | pledge<10%, insiders not net selling (na_pass), `roe_best`>10%, P/E<30 |
+| `institutional_block_value` | block-deal footprint | block discount within ±10%, `roe_best`>10%, P/E<30 |
+
+**Industry-neutral & multi-factor**
+
+| name | thesis | legs |
+|---|---|---|
+| `industry_neutral_value` | cheap for its sector | industry_rank(earnings yield)≥70%, industry_rank(ROE)≥60%, cap 3 |
+| `industry_neutral_momentum` | winners for their sector | industry_rank(6-1 mom)≥75%, >200d MA, cap 3 |
+| `all_weather_multifactor` | 4-pillar blend | value+quality+momentum+low-vol ranked equally, cap 4 |
+| `value_momentum_combo` | Asness barbell | P/E<20, P/B<3, 6-1 momentum>0, >200d MA, cap 5 |
+
+**Undervalued + tailwind** (value with a catalyst — the "margin of safety
+that something is starting to happen to" family)
+
+| name | thesis | legs |
+|---|---|---|
+| `undervalued_tailwind` | the core: cheap, floored, and re-rating on volume | P/E<25, P/B<2.5, `roe_best`>8%, 3-1 mom>0, >60d MA, amount_ma20≥amount_ma60, growth>−10% (na_pass), cap 4 |
+| `davis_double_play` | *stmt* earnings growth + multiple expansion together | P/E<35, profit>10%, rev>0, `roe_best`>8%, OCF>0, >60d MA; clip-ranked growth, cap 3 |
+| `left_side_accumulation` | step 1: the patient base-position list, no confirmation asked | P/E<15, P/B<1.5, `roe_best`>6%, yield≥2.5%, ret_63d>−15%, mom>−10%, growth>−30% (na_pass), cap 5 |
+| `capital_inflection_value` | the "ignored" status breaking, read from flows | P/E<20, P/B<3, `roe_best`>6%, margin balance +3%/20d OR holders −3%, ≥97% of 60d MA, not lottery, cap 4 |
 
 Every preset starts from a shared hygiene block (traded, price ≥ 2 CNY,
 20d mean traded value ≥ 5e7) — `load_preset` prepends any that are missing.
@@ -571,8 +669,10 @@ qf_screen/
 │                    factor CSV bridge, table cache (flat codec, inventory), safe parallel map
 ├── rules/           feature panel (+ store-keyed feature cache), DSL, hygiene/technical/
 │                    fundamental/alt features
-├── presets/         five built-in YAML screens + the registry (built-in and user
-│                    presets, `$QF_SCREEN_PRESETS_DIR`) + the init-preset scaffold
+├── presets/         54 built-in YAML screens (9 strategy families; family
+│                    folders one directory deep, e.g. undervalue_tailwind/,
+│                    count too) + the registry (built-in and user presets,
+│                    `$QF_SCREEN_PRESETS_DIR`) + the init-preset scaffold
 ├── ui/              what qf_screen shows (reached through the command line):
 │   ├── render.py        the units: one feature value in its human unit; text / Markdown tables
 │   ├── briefing.py      the text / JSON / Markdown views (run, diff, inspect, report, compare)

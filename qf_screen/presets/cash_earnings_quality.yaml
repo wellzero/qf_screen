@@ -1,0 +1,29 @@
+name: cash_earnings_quality
+description: >
+  Low-accrual earners: operating cash flow at or above reported TTM
+  profit (profit > 0 required, so the ratio is meaningful), free cash
+  flow positive, statement ROE above 10%.  The accruals anomaly says
+  earnings not backed by cash are lower quality and mean-revert; this is
+  the positive tail of that spread.  All legs are lxg statement features
+  (~765 names; 333 of them clear the cash-conversion bar on the 2026-11
+  store).  Ranked by cash conversion (OCF / |profit|), FCF yield and
+  ROE.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: conversion, expr: "ocf_ttm >= profit_ttm and profit_ttm > 0"}
+  - {name: fcf,        expr: "fcf_ttm > 0"}
+  - {name: roe,        expr: "roe > 0.10"}
+
+rank:
+  - {expr: "pct_rank(ocf_ttm / maximum(abs(profit_ttm), 1))", weight: 1.0}
+  - {expr: "pct_rank(fcf_yield)",                             weight: 0.5}
+  - {expr: "pct_rank(roe)",                                   weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

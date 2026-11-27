@@ -1,0 +1,27 @@
+name: uptrend_pullback
+description: >
+  Buy the dip in an intact uptrend: price at least 3% above the 200-day
+  mean (the trend that matters is up) while the last month gave back
+  between 0 and 15% (a dip, not a break -- deeper than -15% and the
+  "uptrend" premise is gone).  A quality floor (roe_best > 8%) keeps
+  the dip a discount on a going concern rather than a melting cube.
+  Ranked by dip depth first (deeper discount, same trend), quality
+  second.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: trend,   expr: "ma_ratio_200 > 1.03"}
+  - {name: dip,     expr: "ret_21d > -0.15 and ret_21d < 0"}
+  - {name: quality, expr: "roe_best > 0.08"}
+
+rank:
+  - {expr: "pct_rank(-ret_21d)",  weight: 1.0}
+  - {expr: "pct_rank(roe_best)",  weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

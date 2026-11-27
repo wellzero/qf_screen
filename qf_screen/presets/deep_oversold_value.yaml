@@ -1,0 +1,28 @@
+name: deep_oversold_value
+description: >
+  Contrarian deep value: the last six months down more than 10%, but
+  the name pays (trailing yield at least 2%), is cheap on both earnings
+  (positive P/E under 15) and book (under 1.8x), and is liquid -- the
+  beaten-down payer whose dividend keeps paying while the price
+  recovers.  4,430 names are down 10%+ over six months on the 2026-11
+  tape; the valuation and yield legs do the discriminating.  Ranked by
+  drawdown depth and earnings yield equally.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: beaten,    expr: "ret_126d < -0.10"}
+  - {name: cheap,     expr: "pe_ttm > 0 and pe_ttm < 15"}
+  - {name: cheap_book, expr: "pb > 0 and pb < 1.8"}
+  - {name: pay,       expr: "div_yield_ttm >= 0.02"}
+
+rank:
+  - {expr: "pct_rank(-ret_126d)",      weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

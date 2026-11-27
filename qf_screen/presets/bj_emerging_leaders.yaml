@@ -1,0 +1,30 @@
+name: bj_emerging_leaders
+description: >
+  Beijing Stock Exchange (北交所) emerging leaders: profitable
+  (roe_best > 8%), reasonably priced (positive P/E under 40), holding
+  the 60-day mean, listed at least 180 days, with a turnover cap at
+  20% for a board whose 30% daily band invites driven tapes.  DATA
+  HONESTY: on the 2026-11 store the default lxg+ak merge prices exactly
+  ONE Beijing name (the ~275 BJ equity dirs carry only xq/xtq pages,
+  an opt-in provider), so this screen returns at most a member or two
+  until BJ daily data lands -- the 355 BJ names in the company list say
+  the board exists, the price store says it is not loaded yet.  Like
+  smart_money_ashare's dead northbound leg, the screen ships ready for
+  its data.
+
+universe:
+  boards: [bj]
+  exclude_st: true
+  min_listed_days: 180
+
+filters:
+  - {name: profitable, expr: "roe_best > 0.08"}
+  - {name: price,      expr: "pe_ttm > 0 and pe_ttm < 40"}
+  - {name: trend,      expr: "ma_ratio_60 > 0.95"}
+  - {name: not_hot,    expr: "turnover_ma20 <= 20"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",  weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)", weight: 1.0}
+
+top_n: 20

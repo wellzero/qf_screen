@@ -1,0 +1,28 @@
+name: long_term_momentum_12m
+description: >
+  The classic 12-1 momentum (Jegadeesh–Titman): trailing 12-month return
+  skipping the most recent month above 15%, price above the 200-day
+  mean, no more than median 60-day volatility, and not in the lottery
+  top decile -- the two guards that keep the momentum premium from
+  bleeding into the lottery premium.  The skip-month construction leaves
+  the short-term reversal out of the signal.  Ranked by momentum with a
+  nearness-to-high tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: momentum,    expr: "mom_252s21 > 0.15"}
+  - {name: trend,       expr: "ma_ratio_200 > 1"}
+  - {name: low_vol,     expr: "pct_rank(vol_60d) <= 0.5"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(mom_252s21)",   weight: 1.0}
+  - {expr: "pct_rank(high252_ratio)", weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

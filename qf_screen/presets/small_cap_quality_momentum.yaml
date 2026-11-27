@@ -1,0 +1,27 @@
+name: small_cap_quality_momentum
+description: >
+  Small caps with something behind the price: 20–120亿 market cap,
+  implied-or-statement ROE above 10%, positive 3-1 momentum and above
+  the 60-day mean -- quality and trend compounding the size premium.
+  The rank tilts smaller (inverse log cap) so the list leans to the
+  bottom of the band.  Full-market features.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: size,     expr: "market_cap_bn >= 20 and market_cap_bn <= 120"}
+  - {name: quality,  expr: "roe_best > 0.10"}
+  - {name: momentum, expr: "mom_63s21 > 0"}
+  - {name: trend,    expr: "ma_ratio_60 > 1"}
+
+rank:
+  - {expr: "pct_rank(mom_63s21)",          weight: 1.0}
+  - {expr: "pct_rank(roe_best)",           weight: 1.0}
+  - {expr: "pct_rank(-log(market_cap_bn))", weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

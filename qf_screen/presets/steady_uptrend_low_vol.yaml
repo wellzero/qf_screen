@@ -1,0 +1,25 @@
+name: steady_uptrend_low_vol
+description: >
+  Smooth risk-adjusted uptrends: above the 20/60/200-day means and in
+  the calmer half of the cross-section, then ranked by trend Sharpe --
+  6-1 momentum divided by 60-day volatility -- so the top of the list is
+  the steadiest climbers, not the jumpiest.  (The mined qf_mine
+  expression library's ranked-volatility and momentum shapes composed
+  into one score.)  Full-market price features.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: stack,   expr: "ma_ratio_20 > 1 and ma_ratio_60 > 1 and ma_ratio_200 > 1"}
+  - {name: calm,    expr: "pct_rank(vol_60d) <= 0.5"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(mom_126s21 / vol_60d)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

@@ -1,0 +1,27 @@
+name: financial_blue_chips
+description: >
+  The financials a value screen must exclude: banks, brokers and
+  insurers (the company list's fsTableType) at a positive P/E under 10,
+  price below 1.5x book, paying at least 3%.  Leverage is their business
+  model, so no debt_assets rule appears -- the valuation and yield legs
+  are the whole discipline.  94 financial names load on the 2026-11
+  store and 22 clear every leg; the screen keeps 20.  Ranked by yield
+  and ROE (roe_best: the pb/pe-implied ROE covers most financials).
+
+universe:
+  boards: [main]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 2e8"}
+  - {name: financials, expr: "financial > 0.5"}
+  - {name: cheap,      expr: "pe_ttm > 0 and pe_ttm < 10"}
+  - {name: book,       expr: "pb > 0 and pb < 1.5"}
+  - {name: pay,        expr: "div_yield_ttm >= 0.03"}
+
+rank:
+  - {expr: "pct_rank(div_yield_ttm)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)",      weight: 1.0}
+
+top_n: 20

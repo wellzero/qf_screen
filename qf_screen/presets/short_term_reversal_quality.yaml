@@ -1,0 +1,27 @@
+name: short_term_reversal_quality
+description: >
+  The 1-month reversal on quality names: the last month down between 5%
+  and 25% (the short-term-reversal band), but the name is profitable
+  (roe_best > 12%, full-market coverage) and cheap (positive P/E under
+  25) -- oversold on price, not on fundamentals.  The reversal effect
+  (the strongest shape in the qf_mine mined baselines, Neg(returns))
+  pays best where the bounce candidate is not actually broken.  Ranked
+  by dip depth with a quality tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: oversold, expr: "ret_21d > -0.25 and ret_21d < -0.05"}
+  - {name: quality,  expr: "roe_best > 0.12"}
+  - {name: value,    expr: "pe_ttm > 0 and pe_ttm < 25"}
+
+rank:
+  - {expr: "pct_rank(-ret_21d)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

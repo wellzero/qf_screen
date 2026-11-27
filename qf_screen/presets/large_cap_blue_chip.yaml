@@ -1,0 +1,27 @@
+name: large_cap_blue_chip
+description: >
+  Mega-cap core: at least 500亿 total market cap, implied-or-statement
+  ROE above 12%, paying at least 2%, in the calmer 60% by volatility
+  and trading at least 3亿 a day -- the book you can actually hold.
+  305 names clear the cap band on the 2026-11 store.  Ranked quality +
+  yield with a low-vol tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 3e8"}
+  - {name: size,    expr: "market_cap_bn >= 500"}
+  - {name: quality, expr: "roe_best > 0.12"}
+  - {name: pay,     expr: "div_yield_ttm >= 0.02"}
+  - {name: calm,    expr: "pct_rank(vol_60d) <= 0.6"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",      weight: 1.0}
+  - {expr: "pct_rank(div_yield_ttm)", weight: 1.0}
+  - {expr: "pct_rank(-vol_60d)",      weight: 0.3}
+
+top_n: 20
+max_per_industry: 3

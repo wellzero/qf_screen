@@ -1,0 +1,28 @@
+name: breakout_52w_high
+description: >
+  George–Hwang: within 10% of the 52-week high AND above the 20/60/200-
+  day means, excluding the lottery top decile (MAX) so the strength is
+  not one spike day.  Anchoring: names near their high underreact to
+  good news; the nearness itself is the signal.  In a drawdown like the
+  2026-11 tape this is a short list by construction (143 of 5,189 names
+  sit at 90%+ of the high; 376 above the 200d mean) -- that is the
+  screen's honesty, not a bug.  Ranked by nearness to the high with a
+  momentum tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: near_high,   expr: "high252_ratio >= 0.90"}
+  - {name: stack,       expr: "ma_ratio_20 > 1 and ma_ratio_60 > 1 and ma_ratio_200 > 1"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(high252_ratio)", weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",     weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

@@ -1,0 +1,27 @@
+name: volatility_compression
+description: >
+  Quiet before the move: 20-day volatility below 75% of the 120-day
+  volatility (the range contracting) while price holds above its 60-
+  and 200-day means and within 40% of the 52-week high -- compression
+  inside an uptrend, not inside a decay.  856 names carry the
+  contraction on the 2026-11 store; the trend legs cut that to the
+  screen.  Ranked by the compression ratio (long vol / short vol) with
+  a nearness-to-high tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: compressed,  expr: "vol_20d < vol_120d * 0.75"}
+  - {name: trend,       expr: "ma_ratio_60 > 1 and ma_ratio_200 > 1"}
+  - {name: near_high,   expr: "high252_ratio >= 0.60"}
+
+rank:
+  - {expr: "pct_rank(vol_120d / vol_20d)", weight: 1.0}
+  - {expr: "pct_rank(high252_ratio)",      weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

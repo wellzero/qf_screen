@@ -1,0 +1,32 @@
+name: dividend_growth_quality
+description: >
+  Dividend payers that are also quality compounders: a trailing yield of
+  at least 2.5% (about the market's 75th percentile), ROE above 12% on
+  the full-market roe_best (statement ROE with the pb/pe-implied
+  fallback), and -- where lxg statements exist -- growth off a base that
+  was already profitable and a balance sheet under 65% leverage.  The
+  growth and balance legs carry na_pass: they tighten the ~765 statement
+  names without shrinking the screen to them, and the funnel shows how
+  many passed each leg unjudged.  Ranked yield + quality, growth as the
+  tie-breaker.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: pay,       expr: "div_yield_ttm >= 0.025"}
+  - {name: quality,   expr: "roe_best > 0.12"}
+  # optional legs: judged only where lxg statements exist
+  - {name: growth,    expr: "rev_growth > 0.05 and profit_growth > 0.05", na_pass: true}
+  - {name: balance,   expr: "debt_assets < 0.65", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(div_yield_ttm)",           weight: 1.0}
+  - {expr: "pct_rank(roe_best)",                weight: 1.0}
+  - {expr: "pct_rank(clip(profit_growth, -1, 1))", weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

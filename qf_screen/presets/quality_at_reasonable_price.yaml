@@ -1,0 +1,27 @@
+name: quality_at_reasonable_price
+description: >
+  QARP on the full market (no statement dependency): implied-or-statement
+  ROE above 14% (about the market's 90th percentile), a positive P/E
+  under 22, price below 4x book, and the price at least within 5% of the
+  200-day mean -- quality, but not chased far above its trend.  Every
+  leg is a full-coverage feature, so the funnel narrows through ~5,200
+  candidates.  Ranked quality first, cheapness second.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: quality,   expr: "roe_best > 0.14"}
+  - {name: price,     expr: "pe_ttm > 0 and pe_ttm < 22"}
+  - {name: book,      expr: "pb > 0 and pb < 4"}
+  - {name: trend,     expr: "ma_ratio_200 > 0.95"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

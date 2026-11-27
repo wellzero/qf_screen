@@ -1,0 +1,31 @@
+name: growth_momentum
+description: >
+  CANSLIM-style growth confirmed by price: statement revenue and profit
+  growth above 15% (off any base -- this is the momentum-flavored
+  variant, the base-effect guarded twin is hyper_growth_revenue), the
+  price above its 60-day mean and within 25% of the 52-week high -- the
+  market agreeing with the fundamentals before entry.  The growth leg
+  carries na_pass so non-statement names pass unjudged and the trend
+  legs stay the gate; on the 2026-11 store the statement names that
+  clear growth AND the trend legs number in the dozens.  Ranked growth
+  (capped) + momentum.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: growth,    expr: "rev_growth > 0.15 and profit_growth > 0.15", na_pass: true}
+  - {name: trend,     expr: "ma_ratio_60 > 1"}
+  - {name: near_high, expr: "high252_ratio >= 0.75"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(clip(profit_growth, -1, 1))", weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",                  weight: 1.0}
+  - {expr: "pct_rank(high252_ratio)",              weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

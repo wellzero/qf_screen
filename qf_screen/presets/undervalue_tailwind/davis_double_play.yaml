@@ -1,0 +1,35 @@
+name: davis_double_play
+description: >
+  The Davis Double Play the Undervalued + Tailwind framework names as
+  its payoff: earnings growth AND multiple expansion compounding in
+  the same holding period.  Cheap on the entry multiple (positive P/E
+  under 35), growing for real off lxg statements (profit +10%,
+  revenue positive -- a statement-subset screen by design: ~585 liquid
+  names carry the file), cash-backed (ocf_ttm > 0) so the growth is
+  not accrual paint, and the re-rating already underway (price above
+  its 60-day mean) so the screen buys the double play in progress,
+  not the hope of one.  Growth is clipped to [-1, 1] for ranking --
+  a +257% outlier must not own the composite.  2026-11-27 tape: 110
+  names clear the growth legs, 21 clear every leg.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: cheap,     expr: "pe_ttm > 0 and pe_ttm < 35"}
+  - {name: earning,   expr: "profit_growth > 0.10"}
+  - {name: growing,   expr: "rev_growth > 0"}
+  - {name: floor,     expr: "roe_best > 0.08"}
+  - {name: cash,      expr: "ocf_ttm > 0"}
+  - {name: rerating,  expr: "ma_ratio_60 > 1"}
+
+rank:
+  - {expr: "pct_rank(clip(profit_growth, -1, 1))", weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)",             weight: 0.75}
+  - {expr: "pct_rank(mom_63s21)",                  weight: 0.5}
+
+top_n: 20
+max_per_industry: 3

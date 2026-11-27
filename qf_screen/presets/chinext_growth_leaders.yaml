@@ -1,0 +1,29 @@
+name: chinext_growth_leaders
+description: >
+  ChiNext (创业板) leaders: profitable (roe_best > 10%), not absurdly
+  priced (positive P/E under 60 -- ChiNext's own scale), above the
+  60-day mean, and growing where lxg statements exist (the growth leg
+  carries na_pass so the ~765-name statement subset tightens the screen
+  without defining it).  1,453 ChiNext names load on the 2026-11 store.
+  Ranked momentum + quality; the 20% board band argues for the
+  not-lottery guard.
+
+universe:
+  boards: [chinext]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: profitable,  expr: "roe_best > 0.10"}
+  - {name: price,       expr: "pe_ttm > 0 and pe_ttm < 60"}
+  - {name: growth,      expr: "rev_growth > 0.10 and profit_growth > 0.10", na_pass: true}
+  - {name: trend,       expr: "ma_ratio_60 > 1"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(mom_63s21)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)",  weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

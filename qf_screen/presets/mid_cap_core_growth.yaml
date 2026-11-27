@@ -1,0 +1,29 @@
+name: mid_cap_core_growth
+description: >
+  Mid-cap core holdings: 100–500亿 market cap, implied-or-statement ROE
+  above 12%, a positive P/E under 30, and the price above the 200-day
+  mean -- institutional-size names still growing, at prices that are
+  not narratives.  The 200-day leg is the binding one in a drawdown
+  (376 of 5,194 names clear it on the 2026-11 store) and that is the
+  screen's discipline.  Ranked quality + cheapness with a momentum
+  tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: size,    expr: "market_cap_bn >= 100 and market_cap_bn <= 500"}
+  - {name: quality, expr: "roe_best > 0.12"}
+  - {name: price,   expr: "pe_ttm > 0 and pe_ttm < 30"}
+  - {name: trend,   expr: "ma_ratio_200 > 1"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(mom_126s21)",     weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

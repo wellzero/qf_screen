@@ -1,0 +1,29 @@
+name: magic_formula
+description: >
+  Greenblatt's Magic Formula, A-share edition: among liquid non-financial
+  names with positive operating cash flow, buy the best combination of
+  cheap (earnings yield) and good (return on assets).  The screen keeps
+  the funnel deliberately light -- a positive ROA floor plus a positive
+  P/E -- because the formula's work happens in the RANK: pct_rank(roa)
+  and pct_rank(earnings_yield) weighted equally, exactly the original's
+  two-leg composite.  roa and ocf_ttm are lxg statement features, so the
+  candidate pool is the ~765-name statement subset.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,       expr: "amount_ma20 >= 1e8"}
+  - {name: not_financial, expr: "fillna(financial, 0) < 0.5"}
+  - {name: cash,         expr: "ocf_ttm > 0"}
+  - {name: good,         expr: "roa > 0.02"}
+  - {name: cheap,        expr: "pe_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(roa)",            weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

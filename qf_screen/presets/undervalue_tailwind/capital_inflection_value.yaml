@@ -1,0 +1,37 @@
+name: capital_inflection_value
+description: >
+  The tailwind leg of the Undervalued + Tailwind framework read from
+  flows: cheap (P/E under 20, book under 3x, roe_best > 6%) while at
+  least one smart-money inflow fires -- the margin financing balance
+  up 3%+ over its trailing 20 rows (unit-free; only changes are
+  meaningful in that file) OR the shareholder count down 3%+ at the
+  latest quarterly report (chips concentrating).  A name missing both
+  files has no inflow evidence and simply fails -- no na_pass on that
+  leg by design; each file covers roughly 1.3k names, which is why
+  EITHER carries.  Price within 3% of its 60-day mean (no longer
+  making new lows) and not a lottery spike (pct_rank(max21) < 0.9)
+  keep the false tailwinds -- conceptual hype with no flow -- out.
+  2026-11-27 drawdown tape: 188 cheap names carry an inflow signal,
+  64 clear every leg.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: cheap,      expr: "pe_ttm > 0 and pe_ttm < 20"}
+  - {name: cheap_book, expr: "pb > 0 and pb < 3"}
+  - {name: floor,      expr: "roe_best > 0.06"}
+  - {name: inflow,     expr: "margin_chg_20d > 0.03 or holder_num_chg < -0.03"}
+  - {name: basing,     expr: "ma_ratio_60 > 0.97"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)",     weight: 1.0}
+  - {expr: "pct_rank(margin_chg_20d)",     weight: 0.5}
+  - {expr: "pct_rank(-holder_num_chg)",    weight: 0.5}
+
+top_n: 20
+max_per_industry: 4

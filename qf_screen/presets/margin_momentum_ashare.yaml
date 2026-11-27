@@ -1,0 +1,27 @@
+name: margin_momentum_ashare
+description: >
+  Leveraged money leaning in: the margin financing balance up at least
+  5% over its own trailing 20 rows (unit-free -- the file's early years
+  mix 万元/元, only changes are meaningful) while price holds above both
+  its 20- and 60-day means, with no pledge overhang above 20%
+  (na_pass).  107 names carry the balance rise on the 2026-11 tape
+  (margin balances fall in drawdowns -- that is the signal's rarity);
+  the trend legs cut from there.  Avoids the dead northbound feed.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: margin,     expr: "margin_chg_20d > 0.05"}
+  - {name: trend,      expr: "ma_ratio_20 > 1 and ma_ratio_60 > 1"}
+  - {name: no_overhang, expr: "pledge_ratio < 0.20", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(margin_chg_20d)", weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",      weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

@@ -1,0 +1,28 @@
+name: low_ps_sales_value
+description: >
+  Low price-to-sales value: below 1.5x trailing sales with a positive
+  P/E under 25 (sales cheap AND currently profitable -- the classic P/S
+  trap is a cheap multiple on margin-less revenue), an implied-or-
+  statement ROE floor of 5%, and a trend floor of 90% of the 200-day
+  mean so the cheapness is not a falling knife.  Full-market features
+  throughout.  Ranked by sales yield (1/P/S) with a quality tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: cheap_sales, expr: "ps_ttm > 0 and ps_ttm < 1.5"}
+  - {name: profitable, expr: "pe_ttm > 0 and pe_ttm < 25"}
+  - {name: quality,    expr: "roe_best > 0.05"}
+  - {name: trend,      expr: "ma_ratio_200 > 0.9"}
+
+rank:
+  - {expr: "pct_rank(1 / ps_ttm)",     weight: 1.0}
+  - {expr: "pct_rank(roe_best)",       weight: 0.5}
+  - {expr: "pct_rank(earnings_yield)", weight: 0.5}
+
+top_n: 30
+max_per_industry: 5

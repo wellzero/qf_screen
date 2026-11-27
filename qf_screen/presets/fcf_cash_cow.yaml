@@ -1,0 +1,30 @@
+name: fcf_cash_cow
+description: >
+  Cash cows: free cash flow of at least 4% of market cap, operating cash
+  flow backing at least 80% of reported profit (low accruals), and
+  liabilities under 60% of assets.  fcf_yield, ocf_ttm and the balance
+  ratios are lxg STATEMENT features, so this screen judges only the ~765
+  names with statement pages on disk -- that subset is the screen, not a
+  bug (the funnel's first statement rule shows the drop).  Non-financial
+  by construction of the cash tests.  Ranked by FCF yield with a quality
+  and cheapness tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: fcf,        expr: "fcf_yield >= 0.04"}
+  - {name: cash_backed, expr: "ocf_ttm > 0.8 * profit_ttm and profit_ttm > 0"}
+  - {name: balance,    expr: "debt_assets < 0.6"}
+  - {name: valued,     expr: "pe_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(fcf_yield)",        weight: 1.0}
+  - {expr: "pct_rank(roe)",              weight: 0.5}
+  - {expr: "pct_rank(earnings_yield)",   weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

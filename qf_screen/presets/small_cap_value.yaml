@@ -1,0 +1,27 @@
+name: small_cap_value
+description: >
+  Small-cap value: total market cap between 20 and 100亿 CNY, cheap on
+  earnings (positive P/E under 20) and book (under 2.5x), with an
+  implied-or-statement ROE above 8% -- the size premium bought with a
+  value discipline rather than as a blind size bet.  1,421 liquid names
+  sit in the cap band on the 2026-11 store; the valuation legs cut to
+  the screen.  Full-market features.  Ranked cheapness + quality.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: size,    expr: "market_cap_bn >= 20 and market_cap_bn <= 100"}
+  - {name: value,   expr: "pe_ttm > 0 and pe_ttm < 20"}
+  - {name: book,    expr: "pb > 0 and pb < 2.5"}
+  - {name: quality, expr: "roe_best > 0.08"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

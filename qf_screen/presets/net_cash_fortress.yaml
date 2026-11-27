@@ -1,0 +1,28 @@
+name: net_cash_fortress
+description: >
+  Fortress balance sheets: cash and equivalents at least a quarter of
+  total assets, liabilities under 40%, and positive operating cash flow
+  so the cash is being replenished rather than hoarded out of a dying
+  business.  All three legs are lxg statement features (the ~765-name
+  subset); on the 2026-11 store 101 names clear the cash ratio and 269
+  the leverage cap, and their intersection with positive OCF is the
+  screen.  Ranked by cash richness with a quality and cheapness tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,  expr: "amount_ma20 >= 1e8"}
+  - {name: cash,    expr: "cash_assets >= 0.25"}
+  - {name: low_debt, expr: "debt_assets < 0.40"}
+  - {name: earning, expr: "ocf_ttm > 0"}
+
+rank:
+  - {expr: "pct_rank(cash_assets)",      weight: 1.0}
+  - {expr: "pct_rank(roe)",              weight: 0.5}
+  - {expr: "pct_rank(earnings_yield)",   weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

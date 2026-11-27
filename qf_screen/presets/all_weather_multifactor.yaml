@@ -1,0 +1,32 @@
+name: all_weather_multifactor
+description: >
+  The four-pillar composite: value (earnings yield), quality (roe_best,
+  floor 8%), momentum (6-1) and low volatility (bottom 30%) blended
+  equally in the rank, on a broad funnel -- profitable, P/E under 35,
+  at least 95% of the 200-day mean, no lottery decile.  No single
+  anomaly can carry a name into the list; the cap of 4 per industry
+  keeps the blend from concentrating.  All legs are full-market
+  features.  The tilt legs use the shapes the qf_mine mined library
+  keeps rediscovering: ranked low-vol and ranked momentum.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: profitable,  expr: "roe_best > 0.08"}
+  - {name: price,       expr: "pe_ttm > 0 and pe_ttm < 35"}
+  - {name: trend,       expr: "ma_ratio_200 > 0.95"}
+  - {name: calm,        expr: "pct_rank(vol_60d) <= 0.70"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+  - {expr: "pct_rank(mom_126s21)",     weight: 1.0}
+  - {expr: "pct_rank(-vol_60d)",       weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

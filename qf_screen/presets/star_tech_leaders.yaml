@@ -1,0 +1,29 @@
+name: star_tech_leaders
+description: >
+  STAR Market (科创板) hard-tech leaders: profitable for the board
+  (roe_best > 8% -- a lower bar than the main-board screens, set to the
+  board's own distribution), a positive P/E under 80, above the 60-day
+  mean, with a gross-margin leg judged only where lxg statements exist
+  (na_pass; STAR statement coverage is thin).  621 STAR names load on
+  the 2026-11 store.  Ranked quality + momentum; the 20% board band
+  argues for the not-lottery guard.
+
+universe:
+  boards: [star]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,      expr: "amount_ma20 >= 1e8"}
+  - {name: profitable,  expr: "roe_best > 0.08"}
+  - {name: price,       expr: "pe_ttm > 0 and pe_ttm < 80"}
+  - {name: margin,      expr: "gross_margin > 0.30", na_pass: true}
+  - {name: trend,       expr: "ma_ratio_60 > 1"}
+  - {name: not_lottery, expr: "pct_rank(max21) < 0.9"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",  weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

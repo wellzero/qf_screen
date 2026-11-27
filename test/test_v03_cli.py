@@ -358,7 +358,8 @@ def test_inspect_cli(store_dir, capsys):
     assert main([*base, "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert {"presets", "stats", "passed", "asof"} <= set(payload)
-    assert len(payload["presets"]) == 5                        # every built-in
+    from qf_screen.presets import built_in_presets
+    assert len(payload["presets"]) == len(built_in_presets())  # every built-in
     assert main([*base, "--presets", "value_dividend", "--format", "markdown"]) == 0
     assert "# `SH600001`" in capsys.readouterr().out
     with pytest.raises(SystemExit) as exc:
@@ -382,7 +383,8 @@ def test_report_cli_writes_a_markdown_briefing(store_dir, tmp_path):
 def test_report_cli_json(store_dir, capsys):
     assert main(["report", *_common(store_dir), "--as-of", END, "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["asof"] == END and len(payload["presets"]) == 5
+    from qf_screen.presets import built_in_presets
+    assert payload["asof"] == END and len(payload["presets"]) == len(built_in_presets())
     first = next(iter(payload["presets"].values()))
     assert {"members", "industry_mix", "entered", "exited", "notes"} <= set(first)
 

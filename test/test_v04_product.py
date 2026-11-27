@@ -480,10 +480,12 @@ def test_preset_loader_rejects_what_would_silently_no_op(tmp_path):
         with pytest.raises(PresetError) as exc:
             load(body)
         assert needle in str(exc.value), (body, needle, str(exc.value))
-    # every built-in preset loads under the stricter rules
-    from qf_screen.presets import PRESET_DIR, preset_text
+    # every built-in preset loads under the stricter rules (including the
+    # family-folder members, one directory deep)
+    from qf_screen.presets import built_in_presets, preset_path, preset_text
 
-    for shipped in sorted(PRESET_DIR.glob("*.yaml")):
+    for name in built_in_presets():
+        shipped = preset_path(name)
         doc = read_preset(shipped)
         copy = tmp_path / f"copy_{shipped.stem}.yaml"
         copy.write_text(preset_text("copy_of_it", doc), encoding="utf-8")
@@ -1453,8 +1455,11 @@ def test_html_reports_work_in_a_browser(tmp_path):
             assert all(hidden for hidden, _text in page.evaluate(MEMBER_ROWS))
             assert page.evaluate("document.querySelectorAll('tr.fill:not([hidden])').length") >= 1
             page.fill("#filter", "")
-            # a bar is its own hit target
-            box = page.query_selector("svg.plot g.bar-row rect.hit").bounding_box()
+            # a bar is its own hit target (scrolled into view first: the
+            # 50-preset library pushes the first bar chart below the fold)
+            bar = page.query_selector("svg.plot g.bar-row rect.hit")
+            bar.scroll_into_view_if_needed()
+            box = bar.bounding_box()
             page.mouse.move(box["x"] + 40, box["y"] + 12)
             page.wait_for_timeout(40)
             assert page.evaluate("() => !document.querySelector('.chart-body .tip').hidden")

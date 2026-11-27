@@ -1,0 +1,28 @@
+name: chip_concentration
+description: >
+  Chips concentrating: the shareholder count FELL at least 5% at the
+  latest quarterly report (holders leaving, positions consolidating --
+  the classic 筹码集中 accumulation tell) while price holds above its
+  60-day mean and no pledge overhang above 20% sits on the equity (the
+  pledge leg declines to judge names without the file, na_pass).
+  holder_num_chg is a quarterly step ffilled from report dates; 541
+  names carry the drop on the 2026-11 store, and the trend leg cuts
+  from there.  Avoids the dead northbound feed entirely.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: concentrating, expr: "holder_num_chg < -0.05"}
+  - {name: trend,      expr: "ma_ratio_60 > 1"}
+  - {name: no_overhang, expr: "pledge_ratio < 0.20", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(-holder_num_chg)", weight: 1.0}
+  - {expr: "pct_rank(mom_63s21)",       weight: 0.5}
+
+top_n: 20
+max_per_industry: 4

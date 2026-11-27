@@ -84,12 +84,19 @@ def test_wide_math_matches_numpy_on_real_width(engine):
     assert 0.5 < moutai < 2.0
 
 
-@pytest.mark.parametrize("preset", sorted(set(list_presets()) - {"smart_money_ashare"}))
+#: presets whose membership is honestly limited by the store's own data
+#: (checked by their own targeted tests below, not the count contract)
+DATA_LIMITED = {"smart_money_ashare", "bj_emerging_leaders"}
+
+
+@pytest.mark.parametrize("preset", sorted(set(list_presets()) - DATA_LIMITED))
 def test_every_preset_is_nonempty_and_sane(engine, preset):
     """Each preset: non-empty membership, a monotone funnel, and ranked
     members.  (smart_money_ashare is checked separately: its northbound
     leg is na_pass against a dead 2026-09 disclosure source, and in a deep
-    drawdown its honest membership can be tiny.)"""
+    drawdown its honest membership can be tiny.  bj_emerging_leaders too:
+    the default lxg+ak merge prices only one Beijing name -- the 275 BJ
+    equity dirs carry xq/xtq pages only, an opt-in provider.)"""
     spec = ScreenSpec.from_yaml(preset)
     result = engine.run(spec)
     assert len(result.members) >= 5, f"{preset}: {len(result.members)} members"
@@ -109,6 +116,21 @@ def test_smart_money_degrades_gracefully_on_dead_northbound(engine):
     assert funnel["northbound"] > 1000              # the leg does not veto
     assert len(result.members) >= 1
     assert any("mutual_market" in w for w in result.warnings)
+
+
+def test_bj_preset_degrades_gracefully_without_bj_prices(engine):
+    """The default lxg+ak merge prices only ONE Beijing name (the BJ equity
+    dirs carry xq/xtq pages only, an opt-in provider), so the Beijing
+    screen cannot reach the >= 5 contract -- but it must still compile,
+    run, and show the board restriction doing exactly what it says: a
+    funnel whose `boards` row passes ~1 name and 0-1 members, without
+    error.  The day BJ daily data lands, the same run fills the list."""
+    spec = ScreenSpec.from_yaml("bj_emerging_leaders")
+    result = engine.run(spec)
+    funnel = dict(zip(result.funnel["rule"], result.funnel["passing"]))
+    assert 0 <= funnel["boards"] <= 3               # the one priced BJ name
+    assert len(result.members) <= funnel["boards"]  # nothing invented
+    assert result.funnel["cumulative"].is_monotonic_decreasing
 
 
 def test_div_yield_has_real_coverage(engine):
@@ -260,7 +282,9 @@ def test_diff_inspect_and_report(engine):
                                   top=5)
     assert markdown.startswith("# qf-screen daily briefing — ")
     for name in list_presets():
-        assert f"## `{name}` — " in markdown and len(data["presets"][name]["members"]) >= 1
+        assert f"## `{name}` — " in markdown
+        if name not in DATA_LIMITED:
+            assert len(data["presets"][name]["members"]) >= 1
     assert "## Data warnings" in markdown            # the store has stale alt sources
     assert main(["report", "--data-dir", DATA_DIR, "--as-of", "2026-11-24", "--top", "3"]) == 0
 
@@ -508,8 +532,10 @@ def test_html_reports_are_self_contained(tmp_path, capsys):
         assert f"wrote HTML report to {pages[name]}" in capsys.readouterr().out
     body = {name: path.read_text(encoding="utf-8") for name, path in pages.items()}
     found = {name: _check_markup(text, name) for name, text in body.items()}
+    # the report carries one plot per preset it briefed (all of them) and no
+    # binary blobs; the validate/compare pages carry their two charts + legend
     assert {name: (found[name]["plots"], found[name]["blobs"]) for name in found} == {
-        "report": (5, 0), "validate": (2, 2), "compare": (2, 2)}
+        "report": (len(list_presets()), 0), "validate": (2, 2), "compare": (2, 2)}
     report = body["report"]
     for name in PRESETS:
         assert f"<code>{name}</code> — " in report

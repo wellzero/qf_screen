@@ -1,0 +1,30 @@
+name: high_roe_compounders
+description: >
+  Durable compounders: statement ROE above 15%, gross margin above 30%,
+  net margin above 10% (a moat that reaches the bottom line), positive
+  operating cash flow so the profit is real, leverage under 60%, and a
+  positive P/E under 45 so the quality is not bought at any price.  All
+  quality legs are lxg statement features -- this is a screen of the
+  ~765-name statement subset by design.  Growth is a ranked tie-breaker
+  capped at +/-100% so a turnaround off a thin base cannot head the list.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: roe,      expr: "roe > 0.15"}
+  - {name: moat,     expr: "gross_margin > 0.30 and net_margin > 0.10"}
+  - {name: cash,     expr: "ocf_ttm > 0"}
+  - {name: balance,  expr: "debt_assets < 0.6"}
+  - {name: price,    expr: "pe_ttm > 0 and pe_ttm < 45"}
+
+rank:
+  - {expr: "pct_rank(roe)",                            weight: 1.0}
+  - {expr: "pct_rank(gross_margin)",                   weight: 0.5}
+  - {expr: "pct_rank(clip(rev_growth, -1, 1))",        weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

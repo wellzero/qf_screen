@@ -1,0 +1,27 @@
+name: quiet_pullback_low_vol
+description: >
+  Calm dips: the bottom 35% by 60-day volatility, the long trend up
+  (above the 200-day mean) but the short term below its 20-day mean --
+  a pullback inside a low-volatility uptrend, the defensive entry of
+  the low-risk anomaly.  In the 2026-11 drawdown only 376 names hold
+  the 200-day leg; the calm and pullback legs cut from there.  Ranked
+  by medium-term momentum with an inverse-volatility tilt, so the
+  steadiest trends head the list.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: calm,     expr: "pct_rank(vol_60d) <= 0.35"}
+  - {name: trend,    expr: "ma_ratio_200 > 1"}
+  - {name: pullback, expr: "ma_ratio_20 < 1"}
+
+rank:
+  - {expr: "pct_rank(mom_126s21)",  weight: 1.0}
+  - {expr: "pct_rank(-vol_60d)",    weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

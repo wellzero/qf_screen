@@ -1,0 +1,28 @@
+name: clean_governance_insider
+description: >
+  Clean names: pledge below 10% of equity (1,211 of the 1,514 names
+  with a pledge file clear it), insiders not net sellers over 180 days
+  (insider_net_180d_mc > -0.1% of market cap, na_pass -- the executive-
+  trades file covers ~1,700 names and silence is not selling), with
+  quality (roe_best > 10%) and a sane price (positive P/E under 30).
+  Governance as a hygiene factor on a quality/value book rather than a
+  screen's whole thesis.  Ranked quality + cheapness.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: unpledged,  expr: "pledge_ratio < 0.10"}
+  - {name: insiders,   expr: "insider_net_180d_mc > -0.001", na_pass: true}
+  - {name: quality,    expr: "roe_best > 0.10"}
+  - {name: value,      expr: "pe_ttm > 0 and pe_ttm < 30"}
+
+rank:
+  - {expr: "pct_rank(roe_best)",       weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)", weight: 1.0}
+
+top_n: 30
+max_per_industry: 4

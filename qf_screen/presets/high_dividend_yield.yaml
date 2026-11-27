@@ -1,0 +1,30 @@
+name: high_dividend_yield
+description: >
+  Main-board income names: a trailing dividend yield of at least 4.5%
+  (event-based trailing-365d cash dividends with the lxg dyr fallback),
+  a positive P/E under 20 so the yield is not a valuation artifact of
+  collapsing earnings, and a below-median 60-day volatility tilt so the
+  book is holdable.  The balance leg declines to judge names without
+  statements (na_pass) -- the classic dividend payers are bank and
+  utility balance sheets the rule can check where data exists.  Ranked
+  by yield first, cheapness second.
+
+universe:
+  boards: [main]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: yield,     expr: "div_yield_ttm >= 0.045"}
+  - {name: earnings,  expr: "pe_ttm > 0 and pe_ttm < 20"}
+  - {name: calm,      expr: "pct_rank(vol_60d) <= 0.6"}
+  - {name: balance,   expr: "debt_assets < 0.7", na_pass: true}
+
+rank:
+  - {expr: "pct_rank(div_yield_ttm)",   weight: 1.0}
+  - {expr: "pct_rank(earnings_yield)",  weight: 0.5}
+  - {expr: "pct_rank(-vol_60d)",        weight: 0.3}
+
+top_n: 30
+max_per_industry: 4

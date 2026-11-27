@@ -40,11 +40,25 @@ from qf_screen.analytics import limit_up_mask, perf, simulate, spread_stats
 from qf_screen.data import BOARD_LABELS, BOARD_LIMITS, CNDataStore
 from qf_screen.presets import REQUIRED_HYGIENE, list_presets, load_preset, validate_filters
 from qf_screen.rules import (
-    BoardFilter, CombinedRanker, ExprFilter, ExprRanker, FeaturePanel, Filter,
-    SymbolSetFilter, expr_names, feature_names,
+    BoardFilter, CombinedRanker, DslError, ExprFilter, ExprRanker, FeaturePanel,
+    Filter, SymbolSetFilter, expr_names, feature_names,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def rule_features(expression: str) -> List[str]:
+    """The feature names a rule's expression mentions -- ``[]`` when the
+    string is not a DSL expression at all.  A universe filter
+    (:class:`BoardFilter`, :class:`SymbolSetFilter`) has no ``expr``; the
+    ``explain`` card carries its human description in that slot, and a
+    description ("boards: bj") need not parse.  Found by the 50-preset
+    library: the first preset whose boards a name FAILS reached this path.
+    """
+    try:
+        return expr_names(expression)
+    except DslError:
+        return []
 
 #: tag carried by names with no industry classification (no local
 #: ``lxg/industries.csv`` and no ``--live`` 东财 fallback)
@@ -1032,7 +1046,8 @@ class ScreenEngine:
                 expression = info["rule_exprs"].get(rule, "")
                 failed.append({
                     "rule": rule, "expr": expression,
-                    "features": {feature: values[feature] for feature in expr_names(expression)
+                    "features": {feature: values[feature]
+                                 for feature in rule_features(expression)
                                  if feature in values}})
             card = {"preset": spec.name, "member": info["member"],
                     "rank": info.get("rank"), "members": len(result.members),

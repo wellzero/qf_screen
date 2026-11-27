@@ -1,0 +1,26 @@
+name: short_term_momentum_3m
+description: >
+  Fast 3-1 momentum: positive 63-day return skipping the last month and
+  at least 5%, above both the 20- and 60-day means, with a 20-day mean
+  turnover cap of 15% (the manipulation guard -- a driven tape is not a
+  momentum signal).  Full-market price features; momentum from the
+  store's rebuilt chain-adjusted close.  Ranked by momentum with a
+  short-trend tilt.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: momentum,  expr: "mom_63s21 > 0.05"}
+  - {name: trend,     expr: "ma_ratio_20 > 1 and ma_ratio_60 > 1"}
+  - {name: not_hot,   expr: "turnover_ma20 <= 15"}
+
+rank:
+  - {expr: "pct_rank(mom_63s21)",  weight: 1.0}
+  - {expr: "pct_rank(ma_ratio_20)", weight: 0.3}
+
+top_n: 30
+max_per_industry: 4

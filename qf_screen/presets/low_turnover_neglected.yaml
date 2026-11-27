@@ -1,0 +1,29 @@
+name: low_turnover_neglected
+description: >
+  The neglected-name effect: bottom 35% of the cross-section by 20-day
+  mean turnover rate, but profitable (roe_best > 8%), cheap (positive
+  P/E under 25) and not in freefall (at least 90% of the 200-day mean).
+  The Amihud tilt rides the rank: |21-day return| per unit of traded
+  value, so price impact per yuan -- the illiquidity measure the qf_mine
+  mined library keeps rediscovering -- orders the tail.  Full-market
+  features.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,    expr: "amount_ma20 >= 1e8"}
+  - {name: neglected, expr: "pct_rank(turnover_ma20) <= 0.35"}
+  - {name: quality,   expr: "roe_best > 0.08"}
+  - {name: value,     expr: "pe_ttm > 0 and pe_ttm < 25"}
+  - {name: not_falling, expr: "ma_ratio_200 > 0.9"}
+
+rank:
+  - {expr: "pct_rank(earnings_yield)",                  weight: 1.0}
+  - {expr: "pct_rank(roe_best)",                        weight: 1.0}
+  - {expr: "pct_rank(abs(ret_21d) / amount_ma20)",      weight: 0.5}
+
+top_n: 30
+max_per_industry: 5

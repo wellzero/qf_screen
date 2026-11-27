@@ -34,7 +34,7 @@ include = ["qf_screen*"]
 exclude = ["test*"]
 
 [tool.setuptools.package-data]
-"qf_screen.presets" = ["*.yaml"]
+"qf_screen.presets" = ["*.yaml", "*/*.yaml"]
 
 # Pin the lint contract explicitly (same as the sibling repos): newer ruff
 # releases expand their default rule set, which would make lint results depend

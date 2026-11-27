@@ -1,0 +1,31 @@
+name: analyst_consensus_buy
+description: >
+  Sell-side conviction: at least 2 reports in the trailing 90 days AND
+  at least 80% of them rated 买入/增持, with the price holding 95% of
+  its 60-day mean and an implied-or-statement ROE floor of 8% so the
+  coverage lands on going concerns.  COVERAGE HONESTY: report files
+  exist for ~1,000 names but only ~180 carry a report inside the
+  window on the 2026-11 store (buy_report_ratio_90d is NaN with no
+  reports and fails) -- the screen is intentionally the covered,
+  agreed-upon slice; 2 reports (not 5) matches what the feed supports
+  and the smart_money_ashare convention.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,     expr: "amount_ma20 >= 1e8"}
+  - {name: covered,    expr: "report_cnt_90d >= 2"}
+  - {name: buy_calls,  expr: "buy_report_ratio_90d >= 0.80"}
+  - {name: quality,    expr: "roe_best > 0.08"}
+  - {name: trend,      expr: "ma_ratio_60 > 0.95"}
+
+rank:
+  - {expr: "pct_rank(report_cnt_90d)",        weight: 1.0}
+  - {expr: "pct_rank(buy_report_ratio_90d)",  weight: 1.0}
+  - {expr: "pct_rank(roe_best)",              weight: 0.5}
+
+top_n: 30
+max_per_industry: 4

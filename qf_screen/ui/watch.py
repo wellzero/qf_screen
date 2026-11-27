@@ -43,7 +43,7 @@ import yaml
 from quant_free.common.symbol_format import to_canonical
 
 from qf_screen.data import BOARD_LABELS
-from qf_screen.engine import UNCATEGORIZED, ScreenEngine, ScreenSpec
+from qf_screen.engine import UNCATEGORIZED, ScreenEngine, ScreenSpec, rule_features
 from qf_screen.ui.render import fmt_value
 from qf_screen.rules import DslError, compile_bool, expr_names, feature_names, is_dynamic_feature
 
@@ -486,7 +486,7 @@ def _exit_alert(spec: ScreenSpec, result, symbol: str, pool) -> Alert:
             expression = info["rule_exprs"].get(name, "")
             values = " ".join(
                 f"{feature} {fmt_value(feature, info['features'][feature])}"
-                for feature in expr_names(expression)
+                for feature in rule_features(expression)
                 if feature in info["features"] and _finite(info["features"][feature]))
             parts.append(f"{name} ({values})" if values else name)
         return Alert(symbol, PRESET_EXIT, "medium",

@@ -1,0 +1,27 @@
+name: industry_neutral_value
+description: >
+  Cheap FOR ITS SECTOR: in the top 30% of its 申万 first-level industry
+  by earnings yield and the top 40% by implied-or-statement ROE, with a
+  positive P/E -- the value spread measured inside industries, so a
+  cheap bank is compared with banks, not with software.  industry_rank
+  is NaN for unclassified names and fails them conservatively; the
+  industry cap of 3 then stops any one sector from filling the list.
+  Ranked by the same two industry-relative percentiles.
+
+universe:
+  boards: [a_share]
+  exclude_st: true
+  min_listed_days: 365
+
+filters:
+  - {name: liquid,   expr: "amount_ma20 >= 1e8"}
+  - {name: earning,  expr: "pe_ttm > 0"}
+  - {name: rel_value, expr: "industry_rank(earnings_yield) >= 0.70"}
+  - {name: rel_quality, expr: "industry_rank(roe_best) >= 0.60"}
+
+rank:
+  - {expr: "industry_rank(earnings_yield)", weight: 1.0}
+  - {expr: "industry_rank(roe_best)",       weight: 1.0}
+
+top_n: 30
+max_per_industry: 3

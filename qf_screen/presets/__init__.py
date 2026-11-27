@@ -1,6 +1,8 @@
 """Preset loader & registry: the built-in screens plus the user's own.
 
-A preset is a YAML file in this directory (or an absolute path)::
+A preset is a YAML file in this directory, or one directory deep in a
+family folder (``undervalue_tailwind/`` — named by its file stem either
+way), or an absolute path::
 
     name: value_dividend
     description: cheap, profitable, paying
@@ -114,9 +116,23 @@ def user_preset_files() -> Dict[str, Path]:
     return found
 
 
+def _built_in_files() -> Dict[str, Path]:
+    """``{preset name: file}`` of the shipped presets: every ``*.yaml``
+    directly in :data:`PRESET_DIR` plus one directory deep (family
+    folders, e.g. ``undervalue_tailwind/``); a preset is named by its
+    file stem either way, and a top-level file wins a stem collision
+    with a folder member."""
+    found: Dict[str, Path] = {}
+    for pattern in ("*.yaml", "*/*.yaml"):
+        for path in sorted(PRESET_DIR.glob(pattern)):
+            if path.is_file() and path.stem:
+                found.setdefault(path.stem, path)
+    return found
+
+
 def built_in_presets() -> List[str]:
     """Names of the presets shipped with the package (sorted)."""
-    return sorted(p.stem for p in PRESET_DIR.glob("*.yaml"))
+    return sorted(_built_in_files())
 
 
 def list_presets() -> List[str]:
@@ -132,10 +148,10 @@ def preset_origin(name: str) -> Optional[Dict[str, object]]:
     that replaces a built-in) — ``None`` when no preset has that name."""
     user = user_preset_files().get(str(name))
     if user is not None:
-        overridden = (PRESET_DIR / f"{name}.yaml").exists()
+        overridden = str(name) in _built_in_files()
         return {"kind": "override" if overridden else "user", "path": user}
-    built_in = PRESET_DIR / f"{name}.yaml"
-    return {"kind": "built-in", "path": built_in} if built_in.exists() else None
+    built_in = _built_in_files().get(str(name))
+    return {"kind": "built-in", "path": built_in} if built_in is not None else None
 
 
 def preset_path(name_or_path: str) -> Path:
@@ -148,8 +164,8 @@ def preset_path(name_or_path: str) -> Path:
     user = user_preset_files().get(str(name_or_path))
     if user is not None:
         return user
-    built_in = PRESET_DIR / f"{name_or_path}.yaml"
-    if built_in.exists():
+    built_in = _built_in_files().get(str(name_or_path))
+    if built_in is not None:
         return built_in
     if candidate.exists():
         return candidate
@@ -417,11 +433,11 @@ def init_preset(name: str, base: Optional[str] = None, out=None, force: bool = F
             "(the name is what you type after `qf-screen run`)")
     doc = read_preset(preset_path(base)) if base else None
     notes: List[str] = []
-    if (PRESET_DIR / f"{name}.yaml").exists():
+    if name in _built_in_files():
         notes.append(f"a user preset named {name!r} REPLACES the built-in "
                      f"{name} in every command; delete the file to get it back")
     target = Path(out).expanduser() if out else user_preset_dir() / f"{name}.yaml"
-    if target.resolve() == (PRESET_DIR / target.name).resolve():
+    if PRESET_DIR in target.resolve().parents:
         raise PresetError("the built-in presets are part of the package -- write the "
                           f"override to {user_preset_dir() / target.name} instead")
     if target.exists() and not force:
