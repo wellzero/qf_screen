@@ -231,3 +231,32 @@ its own and an industry cap counted against; the statement payload cache
 thrashed between windows the same way.
 
 Known limits — in `PLAN_v0.3.md` under the record.
+
+
+
+---
+
+# v0.4 — User Presets, a Watchlist Monitor, HTML Reports, an Archive, Webhooks, Cache Pruning (implemented 2026-11-26)
+
+The plan, as the user drafted it, and its full implementation record live
+in **`PLAN_v0.4.md`**.  This is the one-page summary; the numbers were
+measured on the real `QUANT_DATA_DIR` store with `qf-screen 0.4.0`.
+
+| todo | outcome |
+|---|---|
+| `v04-fix-sim-and-cli` | `report --presets a,b` (and `inspect`, `cache warm`) takes commas; `simulate()` carries a stopped name's last close forward inside a holding block and holds cash in a period with nothing buyable; `validate` / `compare` take `--cost-bps` (per side: the net figures beside the gross ones) and `--skip-limit-up` (an entry that closed at its board's limit is refused and counted). Measured on `momentum_trend`, Jan–Sep 2026: 2 of 240 entries refused; 15 bps a side takes the annualized return from −30.2 % to −32.2 % at 73 % monthly turnover |
+| `v04-user-presets-and-watchlists` | every `*.yaml` in `~/.config/qf_screen/presets/` (or `$QF_SCREEN_PRESETS_DIR`) is a preset, found by every command; one named like a built-in replaces it; `init-preset NAME [--from PRESET]` writes a documented file; the loader rejects typo'd keys at every level. `qf-screen watch` runs ST / pledge / trend-break / liquidity / suspension rules over the names you hold, with a `preset_exit` alert under `--preset`, custom rules in a watchlist file, three formats and `--fail-on-alert` (exit 2) |
+| `v04-html-report-and-charts` | `report` / `validate` / `compare --format html`: one self-contained page — inline SVG charts (cumulative value, drawdown, industry concentration), sortable and filterable tables, a crosshair readout, `+NEW` / `−OUT` badges and rank-move pills, a table twin for each chart, dark and print variants; nothing is fetched. Verified by rendering in headless Chromium |
+| `v04-automation-and-history` | `run` / `report --save-history` archives each session's ranked members (idempotent per date and preset); `qf-screen history PRESET` reads back each member's streak. Exit code 2 for `diff --fail-on-change` and `watch --fail-on-alert`; strictly opt-in webhooks (`json` / `feishu` / `dingtalk` / `slack`) on `diff`, `watch`, `report`, exit code 3 when a push fails |
+| `v04-cache-gc-and-release` | `cache clear --stale` / `--older-than DAYS` / `--max-gb N [--dry-run]`, combined or narrowed with `--what`; `cache status` judges validation windows too. 219 unit + 30 real-data tests, `ruff` clean; `README.md` and this file updated |
+
+A warm `run` is unchanged at 0.8–1.0 s; the HTML briefing costs the same
+as the Markdown one (2.5 s); `watch` 0.7–1.0 s; `history` 0.4 s.
+
+Decisions that differ from the plan's letter, and what was not done, are
+in `PLAN_v0.4.md` under the record.  The main ones: `--cost-bps` is **per
+side** of a trade; the limit-up guard tests the **close** (the store has
+no opening prices for most names); `watch` adds a `suspended` alert and
+an unknown-symbol alert; no webhook was sent to a real platform (the
+transport is tested over loopback).
+

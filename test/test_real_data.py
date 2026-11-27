@@ -28,7 +28,7 @@ import pandas as pd
 import pytest
 
 from qf_screen import cache_ops
-from qf_screen.briefing import daily_report
+from qf_screen.ui.briefing import daily_report
 from qf_screen.cli import main
 from qf_screen.data import CNDataStore, build_universe
 from qf_screen.engine import ScreenEngine, ScreenSpec
@@ -378,3 +378,210 @@ def test_warm_run_is_served_from_the_caches():
     result = ScreenEngine(store).run(ScreenSpec.from_yaml("value_dividend"))
     elapsed = time.perf_counter() - began
     assert len(result.members) >= 5 and elapsed < 8.0, f"warm run took {elapsed:.1f}s"
+
+
+# ============================ v0.4 (2026-11-26) ============================
+ASOF = "2026-11-24"                      # the decision date the tests above use too
+WINDOW = ["--start", "2026-06-01", "--end", "2026-09-30", "--horizons", "5"]   # cached by them
+PRESETS = ("low_vol_defensive", "momentum_trend", "quality_growth", "smart_money_ashare",
+           "value_dividend")
+
+
+def _run(argv, capsys, fmt=None):
+    """``main([...])`` must succeed; its stdout comes back as text or JSON."""
+    assert main([*argv, *(["--format", fmt] if fmt else [])]) == 0
+    out = capsys.readouterr().out
+    return json.loads(out) if fmt == "json" else out
+
+
+def test_report_accepts_comma_separated_presets(tmp_path, capsys):
+    """``report --presets a,b`` failed on a preset literally named ``a,b``."""
+    out = tmp_path / "report.md"
+    _run(["report", "--data-dir", DATA_DIR, "--as-of", ASOF, "--top", "3", "--out", str(out),
+          "--presets", "value_dividend,momentum_trend"], capsys)
+    assert re.findall(r"^## `([^`]+)` — ", out.read_text(encoding="utf-8"), flags=re.M) == [
+        "value_dividend", "momentum_trend"]
+    payload = _run(["report", "--data-dir", DATA_DIR, "--as-of", ASOF,
+                    "--presets", "value_dividend, momentum_trend"], capsys, "json")
+    assert list(payload["presets"]) == ["value_dividend", "momentum_trend"]
+
+
+def test_validate_prices_in_costs_and_refuses_limit_up_entries(tmp_path, capsys):
+    base = ["validate", "momentum_trend", "--data-dir", DATA_DIR, *WINDOW]
+    plain = _run(base, capsys, "json")
+    priced = _run([*base, "--cost-bps", "15", "--skip-limit-up"], capsys, "json")
+    assert plain["cost_bps"] == 0 and plain["net"] == {} and plain["skipped"] == {}
+    assert priced["cost_bps"] == 15.0
+    # the screen is the same whatever the book pays or refuses: same members, same horizons
+    assert priced["horizons"] == plain["horizons"]
+    assert [row["members"] for row in priced["per_date"]] == \
+        [row["members"] for row in plain["per_date"]]
+    # the guard refused a real, small share of the entries (1 of 90 over this
+    # window's three rebalances on the 2026-11 store; 2 of 240 over January-September)
+    assert 1 <= priced["skipped"]["skipped"] and priced["skipped"]["entries"] >= 60
+    assert 0 < priced["skipped"]["share"] < 0.05
+    # the net twin is the run's OWN gross twin less its costs -- the gross twin here
+    # excludes the refused entries too, so the plain run is not the baseline
+    gross, net = priced["stats"]["portfolio"], priced["stats"]["portfolio_net"]
+    assert net["ann_return"] < gross["ann_return"] and net["sharpe"] < gross["sharpe"]
+    assert net["days"] == gross["days"] and net["max_drawdown"] <= gross["max_drawdown"] + 1e-12
+    drag = priced["net"]["cost_drag_ann"]
+    assert drag == pytest.approx(gross["ann_return"] - net["ann_return"]) and 0 < drag < 0.10
+    assert priced["net"]["excess_ann"] < priced["spread"]["excess_ann"]
+    assert "portfolio_net" in priced["curve"] and "cost" in priced["per_date"][0]
+    text = _run([*base, "--cost-bps", "15", "--skip-limit-up"], capsys)
+    for needle in ("15 bps cost per side, limit-up entries skipped", "portfolio_net",
+                   "excess_net", "costs        15 bps per side", "limit-up     skipped"):
+        assert needle in text, needle
+    table = tmp_path / "c.csv"
+    _run(["compare", "value_dividend", "momentum_trend", "--data-dir", DATA_DIR, *WINDOW,
+          "--benchmarks", "", "--cost-bps", "15", "--out", str(table)], capsys)
+    compared = pd.read_csv(table, index_col=0)
+    for metric in ("ann_return", "sharpe", "cum_return"):
+        assert compared.loc[f"{metric}_net", "momentum_trend"] < \
+            compared.loc[metric, "momentum_trend"]
+    assert np.isnan(compared.loc["ann_return_net", "universe"])     # the references stay gross
+
+
+def test_watch_reports_the_rules_that_fire(capsys):
+    base = ["watch", "--data-dir", DATA_DIR, "--as-of", ASOF,
+            "--symbols", "SH600519,SZ000858,SH600036", "--preset", "value_dividend"]
+    payload = _run(base, capsys, "json")
+    assert payload["symbols"] == 3 and payload["preset"] == "value_dividend"
+    assert {row["symbol"] for row in payload["rows"]} == {"SH600519", "SZ000858", "SH600036"}
+    assert [rule["name"] for rule in payload["rules"]] == [
+        "st", "pledge", "trend_break", "liquidity", "suspended", "preset_exit"]
+    assert payload["alerts"] == len(payload["detail"]) > 0
+    assert sum(payload["by_severity"].values()) == payload["alerts"]
+    assert all(alert["rule"] in {rule["name"] for rule in payload["rules"]}
+               for alert in payload["detail"])
+    # none of the three sits in the preset's list, and each is told which rules it fails
+    exits = [alert for alert in payload["detail"] if alert["rule"] == "preset_exit"]
+    assert {alert["symbol"] for alert in exits} == {"SH600519", "SZ000858", "SH600036"}
+    assert all(alert["message"].startswith("out of value_dividend: fails ")
+               for alert in exits)
+    assert all(row["name"] for row in payload["rows"])            # 贵州茅台, 五粮液, 招商银行
+    text = _run(base, capsys)
+    assert text.startswith(f"watch: 3 symbols as of {ASOF} (preset: value_dividend) -- ")
+    assert "rules in force: st, pledge, trend_break, liquidity, suspended, preset_exit" in text
+    assert re.search(r"^\s+MEDIUM\s+preset_exit\s+out of value_dividend: fails ", text,
+                     flags=re.M)
+    assert main([*base, "--fail-on-alert"]) == 2                  # what a cron job keys on
+    capsys.readouterr()
+    # without --preset there is no preset-exit alert, and the code follows the count
+    loose = base[:-2]                                            # ... without --preset
+    plain = _run(loose, capsys, "json")
+    assert plain["preset"] is None and "preset_exit" not in {rule["name"] for rule in plain["rules"]}
+    assert all(alert["rule"] != "preset_exit" for alert in plain["detail"])
+    assert main([*loose, "--fail-on-alert"]) == (2 if plain["alerts"] else 0)
+
+
+def test_watch_reads_a_watchlist_file(tmp_path, capsys):
+    book = tmp_path / "book.yaml"
+    book.write_text("preset: value_dividend\nsymbols: [SH600519, SZ000858]\n"
+                    "rules:\n  - {name: dear, expr: \"pe_ttm > 15\", severity: low}\n"
+                    "disable: [pledge, suspended]\nthresholds: {liquidity: 5e8}\n",
+                    encoding="utf-8")
+    payload = _run(["watch", "--data-dir", DATA_DIR, "--as-of", ASOF, "--watchlist", str(book)],
+                   capsys, "json")
+    assert [rule["name"] for rule in payload["rules"]] == [
+        "st", "trend_break", "liquidity", "dear", "preset_exit"]
+    assert [rule["source"] for rule in payload["rules"]] == ["built-in"] * 3 + ["custom", "preset"]
+    dear = [alert for alert in payload["detail"] if alert["rule"] == "dear"]
+    assert len(dear) == 2 and all(alert["severity"] == "low" for alert in dear)
+    assert "pe_ttm " in dear[0]["message"]                          # what the rule read
+
+
+def test_html_reports_are_self_contained(tmp_path, capsys):
+    from test_v04_product import _check_markup
+
+    pages = {}
+    for name, argv in (
+            ("report", ["report", "--data-dir", DATA_DIR, "--as-of", ASOF, "--top", "5"]),
+            ("validate", ["validate", "momentum_trend", "--data-dir", DATA_DIR, *WINDOW,
+                          "--cost-bps", "15", "--skip-limit-up"]),
+            ("compare", ["compare", "value_dividend", "momentum_trend", "low_vol_defensive",
+                         "--data-dir", DATA_DIR, *WINDOW, "--benchmarks", "", "--cost-bps",
+                         "15"])):
+        pages[name] = tmp_path / f"{name}.html"
+        assert main([*argv, "--format", "html", "--out", str(pages[name])]) == 0
+        assert f"wrote HTML report to {pages[name]}" in capsys.readouterr().out
+    body = {name: path.read_text(encoding="utf-8") for name, path in pages.items()}
+    found = {name: _check_markup(text, name) for name, text in body.items()}
+    assert {name: (found[name]["plots"], found[name]["blobs"]) for name in found} == {
+        "report": (5, 0), "validate": (2, 2), "compare": (2, 2)}
+    report = body["report"]
+    for name in PRESETS:
+        assert f"<code>{name}</code> — " in report
+    assert 'class="badge new"' in report and 'class="badge out"' in report
+    assert 'class="pill"' in report and "Industry concentration" in report
+    assert re.search(r"[\u4e00-\u9fff]{2,}", report)      # CJK names survive the round trip
+    validate = body["validate"]
+    assert "15 bps cost per side, limit-up entries skipped" in validate
+    assert '<path class="line series-1 net" ' in validate and "Drawdown from the running peak" in validate
+    assert "Annualized return (net)" in body["compare"]
+    assert '<path class="line series-3 dash-3" ' in body["compare"]
+    for text in body.values():
+        assert "<!doctype html>" in text and "Generated by qf-screen" in text
+
+
+def test_a_user_preset_runs_by_name(tmp_path, monkeypatch, capsys):
+    directory = tmp_path / "presets"
+    scaffold = directory / "my_screen.yaml"
+    assert main(["init-preset", "my_screen", "--from", "momentum_trend", "--out",
+                 str(scaffold)]) == 0
+    assert f"wrote {scaffold}" in capsys.readouterr().out
+    by_path = ["run", str(scaffold), "--data-dir", DATA_DIR, "--as-of", ASOF, "--format", "csv"]
+    assert "my_screen: 30 members as of" in _run(by_path, capsys)            # by path
+    monkeypatch.setenv("QF_SCREEN_PRESETS_DIR", str(directory))
+    listing = _run(["list"], capsys)                              # ... and by name
+    assert f"(top_n 30; user: {scaffold})" in listing
+    assert "(top_n 30; built-in)" in listing
+    by_name = by_path[:1] + ["my_screen"] + by_path[2:]
+    assert "my_screen: 30 members as of" in _run(by_name, capsys)
+    card = _run(["inspect", "SH600519", "--data-dir", DATA_DIR, "--as-of", ASOF], capsys, "json")
+    assert "my_screen" in {entry["preset"] for entry in card["presets"]}
+    report = tmp_path / "r.md"
+    _run(["report", "--data-dir", DATA_DIR, "--as-of", ASOF, "--presets", "my_screen",
+          "--out", str(report)], capsys)
+    assert "## `my_screen` — 30 members" in report.read_text(encoding="utf-8")
+
+
+def test_history_round_trip(tmp_path, capsys):
+    from qf_screen import cache_ops
+
+    archive = tmp_path / "archive"
+    for date in ("2026-11-23", ASOF):
+        assert main(["run", "momentum_trend", "--data-dir", DATA_DIR, "--as-of", date,
+                     "--save-history", str(archive), "--out", str(tmp_path / "m.csv")]) == 0
+        assert f"history: 30 rows for momentum_trend as of {date} -> " in capsys.readouterr().err
+    base = ["history", "momentum_trend", "--data-dir", DATA_DIR, "--history-dir", str(archive)]
+    payload = _run(base, capsys, "json")
+    assert payload["archived_sessions"] == 2 and payload["window"] == ["2026-11-23", ASOF]
+    assert payload["asof"] == ASOF and payload["note"] == ""
+    assert payload["members_per_session"] == {"2026-11-23": 30, ASOF: 30}
+    members = payload["members"]
+    assert [row["rank"] for row in members] == [str(rank) for rank in range(1, 31)]
+    assert all(row["name"] for row in members)
+    assert {row["streak"] for row in members} <= {"1", "2"} and {row["present"] for row in members} <= {"1", "2"}
+    stayed = sum(row["streak"] == "2" for row in members)
+    assert payload["new_today"] == 30 - stayed and len(payload["exited"]) == 30 - stayed
+    current = {row["symbol"] for row in members}
+    for row in payload["exited"]:                        # in the list yesterday, gone today
+        assert row["last_seen"] == "2026-11-23" and row["run"] == "1"
+        assert 1 <= int(row["last_rank"]) <= 30 and row["symbol"] not in current
+    text = _run([*base, "--days", "1"], capsys)          # one session: every member is new
+    assert text.startswith(f"momentum_trend: 30 members as of {ASOF} · 30 new today")
+    assert "counting the last 1 (" + ASOF + ".." + ASOF + ")" in text
+    assert f"momentum_trend: 30 members as of {ASOF} · {payload['new_today']} new today" \
+        in _run(base, capsys)
+    # the cache's own collector on the real cache -- plans only, nothing removed
+    stale = cache_ops.cache_prune(DATA_DIR, stale=True, dry_run=True)
+    assert all(row["reason"] == "stale" for row in stale["remove"])
+    daily = [row for row in cache_ops.cache_status(DATA_DIR)["stores"] if row["kind"] == "store"]
+    assert daily and all(row["fresh"] for row in daily)
+    assert not [row for row in stale["remove"] if row["kind"] == "store"]
+    budget = cache_ops.cache_prune(DATA_DIR, max_gb=0.25, dry_run=True)
+    assert budget["after_bytes"] <= 0.25 * 1024 ** 3 < budget["total_bytes"]
+    assert budget["counts"]["lru"] == len(budget["remove"])
+    assert cache_ops.cache_prune(DATA_DIR, older_than=365, dry_run=True)["remove"] == []

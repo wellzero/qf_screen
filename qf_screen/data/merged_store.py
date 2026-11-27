@@ -492,6 +492,8 @@ class CNDataStore:
     last_session : last complete session on the calendar.
     provenance : per-symbol ``DataFrame`` (sources, date range, adjustments).
     warnings : human-readable data caveats found while loading.
+    symbol_store : the stock & section catalogs
+        (:class:`qf_screen.symbols.SymbolStore`; empty until a sync).
     fingerprint : source-file census the merged tables are keyed on
         (``None`` while the cache is off).
     """
@@ -506,11 +508,18 @@ class CNDataStore:
         self.market = market
         self.lxg = LxgProvider(self.data_dir, market)
         self.ak = AkProvider(self.data_dir, market)
+        #: the stock & section catalogs under ``<market>/symbol/`` (empty
+        #: object when never synced -- reads then come back empty and every
+        #: caller falls back to its old path)
+        from qf_screen.symbols import SymbolStore    # lazy: no import cycle
+
+        self.symbol_store = SymbolStore(self.data_dir, market)
         #: read / write the disk caches (``--no-cache`` disables every one:
         #: the universe census, the merged tables and the derived tables)
         self.use_cache = bool(use_cache)
         self.universe = universe if universe is not None \
-            else build_universe(self.data_dir, market, use_cache=self.use_cache)
+            else build_universe(self.data_dir, market, use_cache=self.use_cache,
+                                symbol_store=self.symbol_store)
 
         self.start = pd.Timestamp(start) if start else None
         self.end = pd.Timestamp(end) if end else None
@@ -960,8 +969,16 @@ class CNDataStore:
         return self.live_meta
 
     def board_members(self, kind: str = "industry") -> pd.DataFrame:
-        """Live 东财 board constituents (``board, code, symbol, name``);
-        ``kind`` is ``"industry"`` or ``"concept"``.  Disk-cached with a TTL."""
+        """东财 board constituents (``board, code, symbol, name``); ``kind``
+        is ``"industry"`` or ``"concept"``.
+
+        Served from the LOCAL symbol catalog when one has been synced
+        (``qf-screen symbol sync`` -- ak boards + custom sections of that
+        kind; no network, no ``--live``); the live akshare client is the
+        fallback (disk-cached with a TTL)."""
+        frame = self.symbol_store.board_frame(kind)
+        if len(frame):
+            return frame
         client = self._live()
         frame, _meta = client.industry_members() if kind == "industry" \
             else client.concept_members()
@@ -969,8 +986,8 @@ class CNDataStore:
 
     def enrich_industry_tags(self) -> int:
         """Give names WITHOUT a local lxg industry an ``industry_l1`` tag
-        from the 东财 industry boards (``--live``; the board file is
-        disk-cached for the day).
+        from the industry boards -- offline from the synced symbol catalog
+        when one exists, else live via ``--live`` (disk-cached for the day).
 
         The 申万 classification of ``lxg/industries.csv`` covers only the
         ~2,000 names with an lxg tree; the other ~3,400 carry no industry
@@ -996,8 +1013,9 @@ class CNDataStore:
             meta.at[symbol, "industry_l1"] = "/".join(boards[symbol])
             filled += 1
         if filled:
-            logger.info("industry tags: %d names classified from the 东财 boards "
-                        "(no local lxg industries.csv)", filled)
+            logger.info("industry tags: %d names classified from the industry "
+                        "boards (local catalog / 东财 live; no local lxg "
+                        "industries.csv)", filled)
         return filled
 
     # ------------------------------------------------------------ status

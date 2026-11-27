@@ -17,10 +17,15 @@ The public names are exported lazily so ``import qf_screen`` stays cheap::
     engine = ScreenEngine(store)
     result = engine.run(ScreenSpec.from_yaml("value_dividend"))
     print(result.members)
+
+    watch(engine, ["SH600519"], preset="value_dividend")     # risk alerts for a book
+    report = engine.validate(ScreenSpec.from_yaml("momentum_trend"), "2026-01-05",
+                             "2026-09-30", cost_bps=15, skip_limit_up=True)
+    print(report.stats["portfolio"], report.stats["portfolio_net"])
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # --------------------------------------------------------------- numexpr
 # CRITICAL (v0.2): pandas delegates wide DataFrame binary ops (+ - * /) to
@@ -58,13 +63,48 @@ _LAZY = {
     "ValidationReport": "qf_screen.engine",
     "Filter": "qf_screen.rules",
     "Ranker": "qf_screen.rules",
-    "ExprRule": "qf_screen.rules",
     "compile_expr": "qf_screen.rules",
     "DslError": "qf_screen.rules",
     "FEATURES": "qf_screen.rules",
     "load_preset": "qf_screen.presets",
     "list_presets": "qf_screen.presets",
     "PRESET_DIR": "qf_screen.presets",
+    "user_preset_dir": "qf_screen.presets",
+    "preset_origin": "qf_screen.presets",
+    "init_preset": "qf_screen.presets",
+    # the portfolio arithmetic behind validate / compare
+    "simulate": "qf_screen.analytics",
+    "limit_up_mask": "qf_screen.analytics",
+    "perf": "qf_screen.analytics",
+    "spread_stats": "qf_screen.analytics",
+    # the watchlist risk monitor
+    "watch": "qf_screen.ui.watch",
+    "WatchReport": "qf_screen.ui.watch",
+    "WatchRule": "qf_screen.ui.watch",
+    "Watchlist": "qf_screen.ui.watch",
+    "load_watchlist": "qf_screen.ui.watch",
+    # the snapshot archive
+    "save_snapshot": "qf_screen.history",
+    "load_history": "qf_screen.history",
+    "history_view": "qf_screen.history",
+    "history_dir": "qf_screen.history",
+    # webhook delivery
+    "send": "qf_screen.notify",
+    "Delivery": "qf_screen.notify",
+    "WebhookError": "qf_screen.notify",
+    # the self-contained HTML pages
+    "daily_report_html": "qf_screen.ui.html_report",
+    "validate_html": "qf_screen.ui.html_report",
+    "compare_html": "qf_screen.ui.html_report",
+    # the cache
+    "cache_status": "qf_screen.cache_ops",
+    "cache_warm": "qf_screen.cache_ops",
+    "cache_prune": "qf_screen.cache_ops",
+    # the stock & section catalogs
+    "SymbolStore": "qf_screen.symbols",
+    "SymbolError": "qf_screen.symbols",
+    "SyncResult": "qf_screen.symbols",
+    "sync_symbols": "qf_screen.symbols",
 }
 
 

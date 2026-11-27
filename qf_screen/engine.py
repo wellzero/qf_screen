@@ -13,7 +13,9 @@
 * :meth:`ScreenEngine.validate` — the historical record of a schedule:
   forward returns at several horizons against the screen's own candidate
   pool, plus the path of the equal-weight portfolio that follows it
-  (turnover, annualized return, Sharpe, max drawdown, benchmarks).
+  (turnover, annualized return, Sharpe, max drawdown, benchmarks) —
+  gross, and net of transaction costs with a limit-up entry guard when
+  asked (``cost_bps`` / ``skip_limit_up``).
 * :meth:`ScreenEngine.diff` — what changed between two snapshots of one
   screen (entered / exited / rank movers).
 * :meth:`ScreenEngine.inspect` — one name through every preset.
@@ -34,8 +36,8 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
 
-from qf_screen.analytics import perf, simulate, spread_stats
-from qf_screen.data import BOARD_LABELS, CNDataStore
+from qf_screen.analytics import limit_up_mask, perf, simulate, spread_stats
+from qf_screen.data import BOARD_LABELS, BOARD_LIMITS, CNDataStore
 from qf_screen.presets import REQUIRED_HYGIENE, list_presets, load_preset, validate_filters
 from qf_screen.rules import (
     BoardFilter, CombinedRanker, ExprFilter, ExprRanker, FeaturePanel, Filter,
@@ -413,6 +415,15 @@ class ValidationReport:
     the portfolio's excess over the universe; ``turnover`` how much of the
     list changes per rebalance; ``curve`` the cumulative value of each
     series on every session of the window.
+
+    Execution (both opt-in): with ``cost_bps > 0`` the report also carries
+    the NET figures — ``stats["portfolio_net"]``, the ``portfolio_net``
+    curve and ``net`` (the net portfolio's excess over the same gross
+    universe baseline) — and ``per_date["cost"]`` what each rebalance
+    paid; with ``skip_limit_up`` the ``skipped`` tally and
+    ``per_date["skipped"]`` count the entries the guard refused.  Both act
+    on the portfolio path only: the horizon block measures the SCREEN
+    (every schedule member, gross), the path measures the tradable book.
     """
     horizons: Dict[int, Dict[str, float]]
     per_date: pd.DataFrame
@@ -421,6 +432,12 @@ class ValidationReport:
     turnover: Dict[str, float] = field(default_factory=dict)
     curve: Optional[pd.DataFrame] = None
     notes: List[str] = field(default_factory=list)
+    #: transaction cost per side the ``*_net`` figures are net of (0 = gross only)
+    cost_bps: float = 0.0
+    #: the net portfolio's excess over the candidate pool (empty while ``cost_bps`` is 0)
+    net: Dict[str, float] = field(default_factory=dict)
+    #: the limit-up guard's tally — ``entries``, ``skipped``, ``share`` (empty when off)
+    skipped: Dict[str, float] = field(default_factory=dict)
 
     def summary(self) -> str:
         lines = []
@@ -435,20 +452,30 @@ class ValidationReport:
             lines.append("")
             for label, stats in self.stats.items():
                 lines.append(
-                    f"{label:10s} ann {stats['ann_return']:+.1%}  "
+                    f"{label:13s} ann {stats['ann_return']:+.1%}  "
                     f"vol {stats['ann_vol']:.1%}  Sharpe {_number(stats['sharpe'])}  "
                     f"maxDD {stats['max_drawdown']:+.1%}  cum {stats['cum_return']:+.1%}"
                     f"  ({int(stats['days'])} sessions)")
-        if self.spread:
-            lines.append(
-                f"{'excess':10s} vs universe {self.spread['excess_ann']:+.1%}/yr  "
-                f"information ratio {_number(self.spread['information_ratio'])}  "
-                f"tracking error {self.spread['tracking_error']:.1%}")
+        for label, spread in (("excess", self.spread), ("excess_net", self.net)):
+            if spread:
+                lines.append(
+                    f"{label:13s} vs universe {spread['excess_ann']:+.1%}/yr  "
+                    f"information ratio {_number(spread['information_ratio'])}  "
+                    f"tracking error {spread['tracking_error']:.1%}")
         if self.turnover:
             lines.append(
                 f"turnover    {self.turnover['mean']:.0%} of the list per rebalance "
                 f"(max {self.turnover['max']:.0%}, {int(self.turnover['rebalances'])} "
                 f"rebalances, {self.turnover['members_mean']:.1f} names each)")
+        if self.cost_bps:
+            lines.append(f"costs        {self.cost_bps:g} bps per side, on the initial "
+                         "purchase, each rebalance's sells and buys and the final "
+                         "liquidation; the baselines are gross")
+        if self.skipped:
+            lines.append(
+                f"limit-up     skipped {int(self.skipped['skipped'])} of "
+                f"{int(self.skipped['entries'])} entries ({self.skipped['share']:.1%}) "
+                "that closed at the daily limit on their entry day")
         lines.extend(self.notes)
         return "\n".join(lines) or "no validation dates"
 
@@ -750,10 +777,19 @@ class ScreenEngine:
         return picked
 
     # -------------------------------------------------------- validate
+    def _limit_up_table(self) -> np.ndarray:
+        """``date x symbol``: each session's raw close sits at the daily
+        limit-up of its board (:func:`~qf_screen.analytics.limit_up_mask`)."""
+        meta = self.store.universe.meta
+        boards = meta["board"].reindex(self.panel.symbols) if "board" in meta.columns \
+            else [""] * len(self.panel.symbols)
+        return limit_up_mask(self.store.wide("close_raw").to_numpy(), boards, BOARD_LIMITS)
+
     def validate(self, spec: ScreenSpec, start=None, end=None,
                  horizons: Sequence[int] = (5, 10, 20), freq: str = "M",
                  apply_top_n: bool = True,
-                 benchmarks: Sequence[str] = DEFAULT_BENCHMARKS
+                 benchmarks: Sequence[str] = DEFAULT_BENCHMARKS,
+                 cost_bps: float = 0.0, skip_limit_up: bool = False
                  ) -> ValidationReport:
         """The historical record of the schedule over ``start`` .. ``end``.
 
@@ -770,11 +806,27 @@ class ScreenEngine:
         the candidate pool, and benchmarks it against each index whose lxg
         file the store carries (:data:`DEFAULT_BENCHMARKS`).  ``apply_top_n``
         passes to :meth:`schedule`.
+
+        Two execution assumptions are opt-in (``qf-screen validate
+        --cost-bps / --skip-limit-up``), and both act on the portfolio
+        path alone:
+
+        * ``cost_bps`` — the transaction cost per side of a trade, in basis
+          points; the report then carries the net figures next to the gross
+          ones (:class:`ValidationReport`, :func:`~qf_screen.analytics.simulate`).
+        * ``skip_limit_up`` — a member whose raw close sits at the daily
+          limit-up on its entry day cannot be bought at that close, and is
+          not: it is left out of that holding period (its share of the
+          book stays in cash) and counted in ``skipped``.  The guard reads
+          the close against the previous traded one, by board (10 % main,
+          20 % ChiNext / STAR, 30 % Beijing; see
+          :func:`~qf_screen.analytics.limit_up_mask`).
         """
         close = self.store.wide("close").astype(float)
         symbols = self.panel.symbols
         calendar = self.panel.calendar
         reach = int(max(horizons))
+        limit_up = self._limit_up_table() if skip_limit_up else None
         schedule, _funnel = self.schedule(spec, start, end, freq=freq,
                                           apply_top_n=apply_top_n)
         if schedule.empty:
@@ -788,6 +840,7 @@ class ScreenEngine:
         rows = []
         holdings: List[Tuple[int, np.ndarray]] = []
         base_holdings: List[Tuple[int, np.ndarray]] = []
+        tally = {"entries": 0.0, "skipped": 0.0}
         for date, members in sorted(by_date.items()):
             t = int(calendar.searchsorted(date))
             if t + reach >= len(calendar):
@@ -796,8 +849,17 @@ class ScreenEngine:
             base_idx = np.flatnonzero(base_mask)
             member_idx = np.array([symbols.get_loc(s) for s in sorted(members)
                                    if s in symbols], dtype=int)
+            # what a book could act on at this close: a name locked at
+            # limit-up has no seller at that price
+            tradable = member_idx
+            if limit_up is not None and len(member_idx):
+                tradable = member_idx[~limit_up[t, member_idx]]
+            tally["entries"] += len(member_idx)
+            tally["skipped"] += len(member_idx) - len(tradable)
             row: Dict = {"date": date, "members": len(member_idx),
                          "baseline": int(base_mask.sum())}
+            if limit_up is not None:
+                row["skipped"] = len(member_idx) - len(tradable)
             for h in horizons:
                 member_ret = _forward_returns(closes, t, h, member_idx)
                 base_ret = _forward_returns(closes, t, h, base_idx)
@@ -806,7 +868,7 @@ class ScreenEngine:
                 row[f"baseline_{h}d"] = float(base_ret.mean()) if len(base_ret) \
                     else np.nan
             rows.append(row)
-            holdings.append((t, member_idx))
+            holdings.append((t, tradable))
             base_holdings.append((t, base_idx))
         per_date = pd.DataFrame(rows)
         if per_date.empty or not holdings:
@@ -836,7 +898,10 @@ class ScreenEngine:
         exits = [t for t, _ in holdings[1:]] + [holdings[-1][0] + reach]
         portfolio = simulate(prices, holdings, exits)
         baseline = simulate(prices, base_holdings, exits)
-        report = ValidationReport(stats, per_date, notes=notes)
+        report = ValidationReport(stats, per_date, notes=notes, cost_bps=float(cost_bps))
+        if skip_limit_up:
+            report.skipped = {**tally, "share": tally["skipped"] / tally["entries"]
+                              if tally["entries"] else np.nan}
         if portfolio.empty or baseline.empty:
             notes.append("no holding period could be simulated (no prices after the "
                          "first rebalance)")
@@ -844,12 +909,20 @@ class ScreenEngine:
         port_returns = pd.Series(portfolio.returns(), index=calendar[portfolio.positions])
         base_returns = pd.Series(baseline.returns(), index=calendar[baseline.positions]) \
             .reindex(port_returns.index)
+        net = simulate(prices, holdings, exits, cost_bps=cost_bps) if cost_bps > 0 \
+            else None
+        if net is not None and net.empty:
+            net = None
         curve: Dict[str, pd.Series] = {
             "portfolio": pd.Series(portfolio.values, index=port_returns.index),
             "universe": pd.Series(baseline.values, index=port_returns.index),
         }
         report.stats["portfolio"] = perf(port_returns)
         report.stats["universe"] = perf(base_returns)
+        if net is not None:
+            net_returns = pd.Series(net.returns(), index=calendar[net.positions])
+            report.stats["portfolio_net"] = perf(net_returns)
+            curve["portfolio_net"] = pd.Series(net.values, index=net_returns.index)
         for code in benchmarks or ():
             label = BENCHMARK_LABELS.get(str(code), str(code))
             series = self.store.index_close(code)
@@ -872,6 +945,14 @@ class ScreenEngine:
         report.spread = spread_stats(port_returns - base_returns)
         report.spread["excess_cum"] = float(
             report.curve["portfolio"].iloc[-1] - report.curve["universe"].iloc[-1])
+        if net is not None:
+            # the net book against the same (gross) baseline
+            report.net = spread_stats(net_returns - base_returns.reindex(net_returns.index))
+            report.net["excess_cum"] = float(
+                report.curve["portfolio_net"].iloc[-1] - report.curve["universe"].iloc[-1])
+            report.net["cost_drag_ann"] = float(
+                report.stats["portfolio"]["ann_return"]
+                - report.stats["portfolio_net"]["ann_return"])
         turnover = portfolio.periods["turnover"]
         report.turnover = {
             "mean": float(turnover.mean()) if turnover.notna().any() else np.nan,
@@ -885,6 +966,13 @@ class ScreenEngine:
             periods[["date", "period_return", "turnover"]]
             .rename(columns={"period_return": "portfolio"}),
             on="date", how="left")
+        if net:
+            # the net walk holds the same book over the same periods
+            report.per_date["cost"] = net.periods["cost"].to_numpy()
+            values = report.curve["portfolio_net"]
+            report.per_date["portfolio_net_cum"] = [
+                float(values.get(date, 1.0)) if date >= values.index[0] else 1.0
+                for date in report.per_date["date"]]
         for column in report.curve.columns:      # cumulative value at each rebalance
             values = report.curve[column]
             report.per_date[f"{column}_cum"] = [
@@ -994,10 +1082,14 @@ class ScreenEngine:
     def compare(self, specs: Sequence[ScreenSpec], start=None, end=None,
                 horizons: Sequence[int] = (5, 10, 20), freq: str = "M",
                 apply_top_n: bool = True,
-                benchmarks: Sequence[str] = DEFAULT_BENCHMARKS
+                benchmarks: Sequence[str] = DEFAULT_BENCHMARKS,
+                cost_bps: float = 0.0, skip_limit_up: bool = False
                 ) -> Tuple[pd.DataFrame, Dict[str, ValidationReport]]:
         """Several screens over ONE window: each is :meth:`validate`d with
-        the same dates, horizons and benchmarks.
+        the same dates, horizons and benchmarks (and, with ``cost_bps`` /
+        ``skip_limit_up``, the same execution assumptions: the ``*_net``
+        rows then sit under their gross twins, and the reference columns
+        stay gross).
 
         Returns ``(table, reports)`` — ``table`` is metrics (rows) by
         preset (columns).  ``excess_ann``, ``information_ratio`` and
@@ -1014,27 +1106,32 @@ class ScreenEngine:
         notes: Set[str] = set()
         for spec in specs:
             report = self.validate(spec, start, end, horizons=horizons, freq=freq,
-                                   apply_top_n=apply_top_n, benchmarks=benchmarks)
+                                   apply_top_n=apply_top_n, benchmarks=benchmarks,
+                                   cost_bps=cost_bps, skip_limit_up=skip_limit_up)
             reports[spec.name] = report
             notes.update(report.notes)
             if not report.stats:
                 columns[spec.name] = {}
                 continue
+            # each net row sits right under its gross twin
+            after = report.stats.get("portfolio_net")
             row: Dict[str, float] = {
                 "members": report.turnover.get("members_mean", np.nan),
                 "turnover": report.turnover.get("mean", np.nan),
-                "rebalances": report.turnover.get("rebalances", np.nan),
-                "ann_return": report.stats["portfolio"]["ann_return"],
-                "ann_vol": report.stats["portfolio"]["ann_vol"],
-                "sharpe": report.stats["portfolio"]["sharpe"],
-                "max_drawdown": report.stats["portfolio"]["max_drawdown"],
-                "cum_return": report.stats["portfolio"]["cum_return"],
-                "excess_ann": report.spread.get("excess_ann", np.nan),
-                "information_ratio": report.spread.get("information_ratio", np.nan),
-            }
+                "rebalances": report.turnover.get("rebalances", np.nan)}
+            pairs: List[Tuple[str, float]] = []
+            for metric in ("ann_return", "ann_vol", "sharpe", "max_drawdown", "cum_return"):
+                pairs.append((metric, report.stats["portfolio"][metric]))
+                if after is not None and metric != "ann_vol":
+                    pairs.append((f"{metric}_net", after[metric]))
+            for metric in ("excess_ann", "information_ratio"):
+                pairs.append((metric, report.spread.get(metric, np.nan)))
+                if metric in report.net:
+                    pairs.append((f"{metric}_net", report.net[metric]))
             for h in sorted(report.horizons):
-                row[f"spread_{h}d"] = report.horizons[h]["spread_mean"]
-                row[f"hit_{h}d"] = report.horizons[h]["hit_rate"]
+                pairs += [(f"spread_{h}d", report.horizons[h]["spread_mean"]),
+                          (f"hit_{h}d", report.horizons[h]["hit_rate"])]
+            row.update(pairs)
             columns[spec.name] = row
         if any(columns.values()):
             market = self.validate(BENCHMARK_UNIVERSE, start, end, horizons=horizons,

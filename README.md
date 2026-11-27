@@ -12,6 +12,11 @@ modes that share ONE definition of a screen:
   plumbing, plus forward-return validation against the screen's own
   candidate pool.
 
+Around the two modes sits the daily workflow (v0.4): your own presets next
+to the built-ins, a watchlist risk monitor, self-contained HTML reports, a
+snapshot archive of what each screen held each day, webhooks and exit
+codes for a post-close job, and a garbage collector for the caches.
+
 It integrates with the `qf_project` ecosystem (`quant_free` constants/helpers,
 `qf_factor` selection screens / ST band detector / lxg finance bridge) and
 leaves the legacy `quant_free/screen` untouched.
@@ -32,7 +37,7 @@ pytest test -m unit          # hermetic; -m data adds real-store smokes
 ## Quickstart
 
 ```bash
-qf-screen list                                   # the built-in presets
+qf-screen list                                   # the presets: built-in and your own
 qf-screen features                               # every feature + DSL function
 qf-screen run momentum_trend --top 10 --explain SH600018
 qf-screen run value_dividend --as-of 2026-11-20 --out members.csv
@@ -43,14 +48,21 @@ qf-screen run momentum_trend --industry 医药生物 --max-per-industry 3
 qf-screen diff value_dividend                    # entered / exited / rank movers
 qf-screen inspect SH600519                       # one stock through every preset
 qf-screen report --out report.md                 # the daily briefing
+qf-screen report --format html --out report.html # ... as one self-contained page
 qf-screen pit momentum_trend --start 2026-01-05 --end 2026-11-24 \
           --freq M --out schedule.csv            # qf_factor-ready
-qf-screen validate momentum_trend --start 2026-01-05 --end 2026-09-30
+qf-screen validate momentum_trend --start 2026-01-05 --end 2026-09-30 \
+          --cost-bps 15 --skip-limit-up          # net of costs, limit-up entries refused
 qf-screen compare value_dividend momentum_trend low_vol_defensive \
           --start 2026-01-05 --end 2026-09-30    # presets side by side
+qf-screen init-preset my_screen --from momentum_trend   # your own preset, documented
+qf-screen watch --symbols SH600519,SZ000858 --preset value_dividend   # risk alerts
+qf-screen run momentum_trend --save-history      # archive today's list ...
+qf-screen history momentum_trend                 # ... how long each member has stayed
 qf-screen data-status                            # coverage / freshness census
 qf-screen cache status                           # what is cached, how fresh
 qf-screen cache warm                              # after a data pull
+qf-screen cache clear --dry-run --stale          # what no run will read again
 qf-screen run value_dividend --no-cache          # source truth: no cache at all
 ```
 
@@ -68,7 +80,7 @@ Library use:
 ```python
 from qf_screen import CNDataStore, ScreenEngine, ScreenSpec
 from qf_screen.presets import list_presets
-from qf_screen.briefing import daily_report
+from qf_screen.ui.briefing import daily_report
 
 store = CNDataStore()                    # last ~600 sessions, 8 workers
 engine = ScreenEngine(store)
@@ -83,7 +95,156 @@ markdown, data = daily_report(engine, [ScreenSpec.from_yaml(n) for n in list_pre
 schedule, funnel = engine.schedule(spec, "2026-01-05", "2026-11-24", freq="M")
 report = engine.validate(spec, "2026-01-05", "2026-09-30")   # + path stats, curve
 table, reports = engine.compare([spec_a, spec_b], "2026-01-05", "2026-09-30")
+report = engine.validate(spec, "2026-01-05", "2026-09-30", cost_bps=15, skip_limit_up=True)
+report.stats["portfolio_net"]                     # the same book after 15 bps a side
+save_snapshot(None, "value_dividend", result.asof, result.members, result.scores)
+view = history_view(load_history(None, "value_dividend"), "value_dividend")
+alerts = watch(engine, ["SH600519", "SZ000858"], preset="value_dividend")
 ```
+
+## v0.4 — user presets, a watchlist monitor, HTML reports, an archive, webhooks
+
+Plan and implementation record: `doc/plan/PLAN_v0.4.md`.  Still strictly
+`lxg` + `akshare` data; a warm `run` is unchanged at 0.8–1.0 s.
+
+**Fixed.**  `report --presets a,b` (and `inspect`, `cache warm`) failed on
+a preset literally named `a,b`: preset lists now take spaces or commas.
+
+**Validation prices the book like a book.**  The per-horizon forward
+returns measure the *screen* (every schedule member, gross) and are
+unchanged.  Two opt-in flags act on the portfolio *path*:
+
+| flag | what it does |
+|---|---|
+| `--cost-bps BPS` | transaction cost per side of every trade — the initial purchase, each rebalance's sells and buys, and the final liquidation — so a round trip always pays both sides whatever the window. The report then carries the net figures beside the gross ones (`portfolio_net`, `excess_net`, `sharpe_net` …; the pool and the indexes stay gross) and what each rebalance paid. |
+| `--skip-limit-up` | a member whose close sits at its board's daily limit on the entry day cannot be bought at that close and is not: it is left out of that holding period (its share of the book stays in cash) and counted. |
+
+The guard reads the close against the previous *traded* close, by board
+(10 % main, 20 % ChiNext / STAR, 30 % Beijing; a close within 0.2 % of
+the limit counts, because the limit price is rounded to 0.01 CNY).  It is
+a test on the close — the store keeps raw closes for every name but
+opening prices only for the lxg layout-A subset, and the validation buys
+at the close.  On the 2026-11 store, `momentum_trend` over January–September
+2026: 2 of 240 entries were refused, and 15 bps a side took the
+annualized return from −30.2 % to −32.2 % at 73 % turnover a month.
+Also hardened: a member that stops trading mid-period is carried at its
+last close inside `simulate()` itself (one missing price used to turn
+`NaN` the whole cross-sectional mean, and with it every later value of
+the path), and a period left with nothing to hold is a period in cash
+rather than a hole in the path.
+
+**User presets.**  Every `*.yaml` in `$QF_SCREEN_PRESETS_DIR` (default
+`~/.config/qf_screen/presets/`) is a preset named by its file stem.  Every
+command that takes a preset name finds it — `run`, `diff`, `inspect`,
+`report`, `pit`, `validate`, `compare`, `cache warm` — and `qf-screen
+list` marks where each one comes from.  A user file named like a built-in
+(`value_dividend.yaml`) **replaces** it; any other name extends the list.
+`qf-screen init-preset NAME [--from PRESET] [--out PATH] [--force]` writes
+a documented starting file (or a copy of another preset) and never
+overwrites an edited one.  The loader now rejects what would fail late or
+silently no-op in a hand-edited file: unknown keys inside `universe` and
+inside each `filter` / `rank` entry, `na_pass` that is not a boolean, a
+rank entry without an expression or with a non-positive weight, a board no
+screener knows, a `top_n` that is not a non-negative integer.
+
+**Watchlist risk monitor.**  `qf-screen watch --symbols A,B` (or
+`--watchlist FILE`) runs risk rules over the names you hold on the decision
+date:
+
+| rule | fires when | severity |
+|---|---|---|
+| `st` | the name is ST/*ST in the company-list snapshot | high |
+| `pledge` | `pledge_ratio >= 0.30` | high |
+| `trend_break` | `ma_ratio_60 < 1` or `ma_ratio_200 < 1` (the message says which) | medium |
+| `liquidity` | `amount_ma20 < 5e7` | high |
+| `suspended` | no close on the as-of session (suspended, halted or delisted) | high |
+| `preset_exit` | with `--preset NAME`: the name is not in that preset's list — told which rules it fails (with what they read), or where it ranks among the passers when only the truncation kept it out | medium |
+
+A missing value never alerts (a rule reports a *known* problem); the two
+rules about absent data itself — `suspended`, and an unknown symbol —
+always do.  `--format table|markdown|json`; `--fail-on-alert` exits 2.
+A watchlist file carries the list and may re-tune the monitor:
+
+```yaml
+preset: value_dividend           # alert when a holding leaves this preset
+symbols: [SH600519, SZ000858]    # a plain list, one symbol per line, works too
+rules:                           # custom rules: DSL boolean, true = alert
+  - {name: fallen,  expr: "high252_ratio < 0.60", severity: high}
+  - {name: too_hot, expr: "ret_21d > 0.30", description: ran too far}
+disable: [pledge]                # built-in rules to switch off
+thresholds: {pledge: 0.20}       # ... or re-tune (pledge, liquidity)
+```
+
+**HTML reports.**  `report`, `validate` and `compare` take `--format
+html`: one self-contained page — inline SVG charts (cumulative value
+against the pool and the indexes, drawdown, industry concentration),
+tables that sort by any column and filter by a symbol / name / industry
+box, a crosshair readout on every line chart, `+NEW` / `−OUT` badges and
+rank-move pills in the briefing, and a table twin for every chart.  No
+CDN, font or image is fetched: the page can be mailed or opened offline.
+Presets keep a fixed colour whatever they rank; the pool and the indexes
+are context, drawn in grey; a net-of-cost path is its gross twin's colour,
+dashed.  Dark mode is its own selected palette, and print / forced-colours
+fall back to line patterns.  The page follows the OS's light / dark
+setting; a host that embeds it in a frame picks the surface instead with
+`data-theme="light"` or `data-theme="dark"` on the root (`<html>`).
+
+**Snapshot archive.**  `run` / `report --save-history [DIR]` appends the
+session's ranked members to one CSV per preset under
+`$QF_SCREEN_HISTORY_DIR` (default `~/.local/share/qf_screen/history/`),
+idempotent per (date, preset) — a second run of the same session replaces
+that session's rows.  `qf-screen history PRESET [--days N]` reads it back:
+for every current member, `streak` (sessions in a row up to today),
+`present` (sessions in the window), `stayed`, `first_seen`; the names that
+left inside the window are listed with the run they had.  A "session" is
+an archived one: a day skipped is not a broken streak, and the command
+says so when member counts swing across the window (a session archived
+with a smaller `--top` makes the names beyond it look new).
+
+**Automation.**
+
+| exit code | meaning |
+|---|---|
+| 0 | all is well |
+| 1 | a screen could not be built |
+| 2 | `diff --fail-on-change` saw a change, or `watch --fail-on-alert` saw an alert |
+| 3 | a webhook that was asked for could not be delivered (it outranks 2: an alert nobody received is not a quiet day) |
+
+`diff`, `watch` and `report` take `--webhook-format
+json|feishu|dingtalk|slack`, `--webhook-url` (or `$QF_SCREEN_WEBHOOK_URL`)
+and `--webhook-secret` (or `$QF_SCREEN_WEBHOOK_SECRET`; 飞书 签名校验, 钉钉
+加签).  They are strictly opt-in: nothing is sent unless `--webhook-format`
+is on the command line, so a URL set in a login profile turns no run into
+a network call.  `json` posts the command's own payload; the others post
+a concise text reading (entered / exited / movers; each alert with its
+severity; one line per preset).  A 200 that is a refusal (飞书 `code`,
+钉钉 `errcode`, Slack `"ok": false`) counts as a failure.
+
+**Cache pruning.**  `cache clear` deletes by kind as before, or prunes:
+
+```bash
+qf-screen cache clear --dry-run --stale            # what no run will read again
+qf-screen cache clear --older-than 30              # ... not used for 30 days
+qf-screen cache clear --max-gb 2                   # ... least recently used until 2 GB
+```
+
+`--stale` removes another version's layout, interrupted writes, a
+merged-store cache built from a source census that has since moved or
+that is incomplete, and the derived tables of every window all of whose
+store caches are gone bad — the fresh daily window is never touched.
+`--older-than` goes by last use (the newer of an entry's write and read
+time; a `relatime` mount refreshes read times at most once a day, a
+`noatime` mount never).  `--max-gb` evicts the least recently used until
+the cache fits.  The three combine, `--what KIND` narrows them, and
+`--dry-run` lists what would go with the reason.  `cache status` now
+judges validation-window caches fresh or stale too.
+
+**Found and fixed on the way.**  `simulate()` drew a period left with no
+holdable name as a hole in the path (it is a period in cash now); a custom
+watch rule naming an unknown feature surfaced as a `KeyError` from the
+panel, and a bad watchlist file as a traceback; YAML 1.1 reads `1e8` as a
+string, so a natural threshold was refused; the lazy export
+`qf_screen.ExprRule` named a class that never existed.
 
 ## v0.3 — daily workflows, validation analytics, a sub-second warm run
 
@@ -338,8 +499,12 @@ pure function of the store's base tables).
 
 ## Validation: what the numbers mean
 
-`validate` buys the schedule's members at each rebalance date's close.  The
-per-horizon block is unchanged from v0.1 (mean forward return of the
+`validate` buys the schedule's members at each rebalance date's close.
+With `--cost-bps` the path is net of costs and `report.stats["portfolio_net"]`,
+`report.curve["portfolio_net"]`, `report.net` (excess, information ratio,
+`cost_drag_ann`) and `report.per_date["cost"]` sit beside the gross ones;
+with `--skip-limit-up` the refused entries are counted in `report.skipped`
+and `report.per_date["skipped"]`.  The per-horizon block is unchanged from v0.1 (mean forward return of the
 members vs every name passing the universe constraints the session before
 — so the spread isolates the FILTERS).  The portfolio block follows the
 equal-weight portfolio that acts on the schedule: rebalanced on each
@@ -375,8 +540,10 @@ speed: a miss is a rebuild, a corrupt or foreign-layout file is a miss,
 and writes are atomic.
 
 ```bash
-qf-screen cache status [--json]        # per kind and per window; daily store fresh or STALE
+qf-screen cache status [--json]        # per kind and per window; every store fresh or STALE
 qf-screen cache clear [--what KIND ...] [--dry-run]   # default: all
+qf-screen cache clear [--stale] [--older-than DAYS] [--max-gb N] [--what KIND]
+                                       [--dry-run]    # prune (above)
 qf-screen cache warm [--presets ...] [--start D --end D] [--symbols A,B]
 ```
 
@@ -404,16 +571,30 @@ qf_screen/
 │                    factor CSV bridge, table cache (flat codec, inventory), safe parallel map
 ├── rules/           feature panel (+ store-keyed feature cache), DSL, hygiene/technical/
 │                    fundamental/alt features
-├── presets/         five built-in YAML screens + loader/validator
+├── presets/         five built-in YAML screens + the registry (built-in and user
+│                    presets, `$QF_SCREEN_PRESETS_DIR`) + the init-preset scaffold
+├── ui/              what qf_screen shows (reached through the command line):
+│   ├── render.py        the units: one feature value in its human unit; text / Markdown tables
+│   ├── briefing.py      the text / JSON / Markdown views (run, diff, inspect, report, compare)
+│   ├── html_report.py   the self-contained HTML pages: inline SVG charts, tables, script
+│   └── watch.py         the watchlist risk monitor: rules, watchlist files, views
 ├── engine.py        ScreenEngine: run / schedule / validate / diff / inspect / compare
-├── analytics.py     schedule → equal-weight portfolio path; return / Sharpe / drawdown
-├── briefing.py      the text / JSON / Markdown views (run, diff, inspect, report, compare)
-├── render.py        feature units, text and Markdown tables
-├── cache_ops.py     cache status / warm
-└── cli.py           qf-screen: list | features | run | diff | inspect | report | pit |
-                              validate | compare | cache | data-status
+├── analytics.py     schedule → equal-weight portfolio path, gross or net of costs;
+│                    return / Sharpe / drawdown; the limit-up test
+├── history.py       the snapshot archive and the persistence view
+├── notify.py        webhook delivery (json / feishu / dingtalk / slack)
+├── cache_ops.py     cache status / warm / prune
+└── cli.py           qf-screen: list | init-preset | features | run | diff | inspect |
+                              report | watch | history | pit | validate | compare | cache |
+                              data-status
 ```
 
+Environment variables: `QUANT_DATA_DIR` (the store), `QF_SCREEN_PRESETS_DIR`
+(user presets), `QF_SCREEN_HISTORY_DIR` (the snapshot archive),
+`QF_SCREEN_WEBHOOK_URL` / `QF_SCREEN_WEBHOOK_SECRET` (only used when a
+command opts in with `--webhook-format`), `QF_SCREEN_FACTOR_PROVIDERS`
+(the CSV bridge's provider trees).
+
 Design notes and measured findings live in the module docstrings; the
-plans and their records are under `doc/plan/` — `PLAN.md` (v0.1, v0.2)
-and `PLAN_v0.3.md`.
+plans and their records are under `doc/plan/` — `PLAN.md` (v0.1, v0.2 and
+one-page summaries) and `PLAN_v0.3.md`, `PLAN_v0.4.md`.

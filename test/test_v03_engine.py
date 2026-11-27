@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 import conftest as cf
-from qf_screen.briefing import (
+from qf_screen.ui.briefing import (
     daily_report, diff_markdown, diff_payload, diff_text, inspect_payload,
 )
 from qf_screen.engine import (
@@ -454,7 +454,7 @@ def test_daily_report_covers_every_preset(store):
 def test_inspect_explains_a_name_that_only_misses_the_top_n(store, tmp_path):
     """Every rule passed and still not a member: the card says where the
     name ranks among the whole passing pool instead of an empty FAIL."""
-    from qf_screen.briefing import inspect_text
+    from qf_screen.ui.briefing import inspect_text
 
     preset = tmp_path / "narrow.yaml"
     preset.write_text(

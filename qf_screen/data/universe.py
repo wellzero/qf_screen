@@ -362,7 +362,8 @@ def _is_nan(value) -> bool:
 
 
 def build_universe(data_dir=None, market: str = "cn", with_industries: bool = True,
-                   max_workers: int = 16, use_cache: bool = True) -> Universe:
+                   max_workers: int = 16, use_cache: bool = True,
+                   symbol_store=None) -> Universe:
     """Universe = company-list snapshot ∪ on-disk stock directories.
 
     The census is a pure function of three things on disk — the set of
@@ -374,12 +375,24 @@ def build_universe(data_dir=None, market: str = "cn", with_industries: bool = Tr
     ~9,800 directories) and every command needs it; reading it back costs
     a few tens of ms.  ``use_cache=False`` (``--no-cache``) builds from
     source and touches nothing.
+
+    ``symbol_store`` (a :class:`qf_screen.symbols.SymbolStore`) fills the
+    GAPS the passive files leave — a name for a stock the company list has
+    no row for, an ``industry_l1`` for a name without ``industries.csv`` —
+    and only fills: a local value always wins.  Its catalog files join the
+    fingerprint, so a ``symbol sync`` invalidates the cache honestly; a
+    store with no files on disk contributes nothing and every cache built
+    before this parameter existed still hits.
     """
     data_dir = Path(data_dir or get_data_dir())
     root = data_dir / market / EQUITY_DIR
     list_path = data_dir / market / PROVIDER_LXG / "company_list.csv"
+    fills = _symbol_fills(symbol_store)
     cacheable = bool(use_cache and with_industries)
-    fingerprint = universe_fingerprint(root, list_path) if cacheable else None
+    symbol_root = symbol_store.root \
+        if symbol_store is not None and symbol_store.present else None
+    fingerprint = universe_fingerprint(
+        root, list_path, symbol_root=symbol_root) if cacheable else None
     if cacheable:
         cached = _read_universe_cache(data_dir, market, root, fingerprint)
         if cached is not None:
@@ -419,6 +432,8 @@ def build_universe(data_dir=None, market: str = "cn", with_industries: bool = Tr
             values = pd.Series({s: levels[s][idx] for s in levels}, dtype=object)
             meta[col] = values.reindex(meta.index).to_numpy()
 
+    if fills is not None:
+        _apply_symbol_fills(meta, fills)
     universe = Universe(meta=meta, dirs=dirs, root=root, names_asof=names_asof)
     logger.info("universe: %d symbols (%d in company list, %d on disk, "
                 "names as of %s)", len(meta), len(listed), len(dirs), names_asof)
@@ -433,10 +448,11 @@ def build_universe(data_dir=None, market: str = "cn", with_industries: bool = Tr
 _UNIVERSE_VERSION = "v1"
 
 
-def universe_fingerprint(root, list_path) -> str:
+def universe_fingerprint(root, list_path, symbol_root=None) -> str:
     """``<equity dir count>:<industries file count>:<mtime sum>`` over the
     equity tree, ``company_list.csv`` and every ``<dir>/lxg/industries.csv``
-    — exactly the inputs of :func:`build_universe`.
+    — exactly the inputs of :func:`build_universe` — plus, when a symbol
+    catalog is on disk, ``:<file count>:<mtime sum>`` of it.
 
     The directory COUNT alone catches a listing or delisting; the
     industries census catches a new lxg download that starts classifying
@@ -444,6 +460,10 @@ def universe_fingerprint(root, list_path) -> str:
     them (the download bumps the mtime); the mtime SUM catches a rewrite
     that leaves a file older than the newest input.  ~30 ms on the real
     store's ~9,800 directories.
+
+    ``symbol_root`` joins in ONLY when the catalog exists, so a store
+    without one (every cache built before the symbols module) keeps its
+    fingerprint and still hits.
     """
     count = industries = 0
     total = 0
@@ -465,7 +485,48 @@ def universe_fingerprint(root, list_path) -> str:
         total += os.stat(list_path).st_mtime_ns
     except OSError:
         pass
-    return f"{count}:{industries}:{total}"
+    out = f"{count}:{industries}:{total}"
+    if symbol_root is not None and Path(symbol_root).is_dir():
+        files = [p for p in Path(symbol_root).rglob("*.csv")]
+        meta = Path(symbol_root) / "meta.json"
+        if meta.exists():
+            files.append(meta)
+        out += f":{len(files)}:{sum(os.stat(p).st_mtime_ns for p in files)}"
+    return out
+
+
+def _symbol_fills(symbol_store):
+    """The gap-filling maps a symbol store can contribute, or ``None`` when
+    it has nothing (absent / empty catalog): ``{"names": …, "industry_l1": …}``."""
+    if symbol_store is None or not symbol_store.present:
+        return None
+    fills = {"names": symbol_store.stock_names(),
+             "industry_l1": symbol_store.industry_l1()}
+    return fills if any(fills.values()) else None
+
+
+def _apply_symbol_fills(meta: pd.DataFrame, fills: dict) -> None:
+    """Fill NAME and ``industry_l1`` gaps in the census from the symbol
+    catalog -- fills only, never overwrites (a local file is the authority
+    wherever it speaks)."""
+    names, industries = fills["names"], fills["industry_l1"]
+    filled_names = filled_industries = 0
+    for symbol in meta.index:
+        if not _text(meta.at[symbol, "name"]):
+            value = names.get(symbol, "")
+            if value:
+                meta.at[symbol, "name"] = value
+                filled_names += 1
+        if "industry_l1" in meta.columns \
+                and not _text(meta.at[symbol, "industry_l1"]):
+            value = industries.get(symbol, "")
+            if value:
+                meta.at[symbol, "industry_l1"] = value
+                filled_industries += 1
+    if filled_names or filled_industries:
+        logger.info("symbol catalog filled %d name(s) and %d industry_l1 "
+                    "gap(s) the passive files leave", filled_names,
+                    filled_industries)
 
 
 def _universe_cache_base(data_dir, market: str) -> Path:

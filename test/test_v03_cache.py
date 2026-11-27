@@ -28,7 +28,7 @@ from qf_screen.data.table_cache import (
     cache_clear, cache_inventory, cache_summary, cached_wide_table, fingerprint, kind_of,
     read_cached_table, read_wide, window_summary, write_cached_table, write_wide,
 )
-from qf_screen.render import fmt_value, human_bytes, industry_line, markdown_table
+from qf_screen.ui.render import fmt_value, human_bytes, industry_line, markdown_table
 from qf_screen.rules import FeaturePanel
 
 pytestmark = pytest.mark.unit

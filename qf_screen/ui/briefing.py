@@ -6,13 +6,13 @@ here reads data or decides anything.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from qf_screen.engine import ScreenDiff, ScreenResult, ScreenSpec, StockCard
-from qf_screen.render import fmt_value, frame_text, industry_line, markdown_table, num, pct
+from qf_screen.ui.render import fmt_value, frame_text, industry_line, markdown_table, num, pct
 
 #: marker the funnel puts on a rule that passes names for lack of data
 NA_MARK = " †"
@@ -294,7 +294,8 @@ def inspect_payload(card: StockCard) -> Dict[str, object]:
 
 # --------------------------------------------------------------- compare
 _PERCENT_METRICS = ("ann_return", "ann_vol", "max_drawdown", "cum_return", "turnover",
-                    "excess_ann")
+                    "excess_ann", "ann_return_net", "max_drawdown_net", "cum_return_net",
+                    "excess_ann_net")
 
 
 def compare_cells(table: pd.DataFrame) -> pd.DataFrame:
@@ -329,6 +330,9 @@ def compare_text(table: pd.DataFrame, notes: Sequence[str] = ()) -> str:
             "excess_ann / spread_Nd: its edge over the preset's OWN candidate pool; "
             "hit_Nd: share of rebalances with a positive edge;\n"
             "universe: every name with a price the session before, equal-weighted")
+    if any(str(metric).endswith("_net") for metric in table.index):
+        lines.append("\n*_net: the same portfolio after transaction costs (the reference "
+                     "columns are gross)")
     notes = list(notes)
     if notes:
         lines += ["notes:"] + [f"  - {note}" for note in notes]
@@ -337,6 +341,9 @@ def compare_text(table: pd.DataFrame, notes: Sequence[str] = ()) -> str:
 
 def compare_markdown(table: pd.DataFrame, notes: Sequence[str] = ()) -> str:
     lines = ["## preset comparison", "", markdown_table(compare_cells(table))]
+    if any(str(metric).endswith("_net") for metric in table.index):
+        lines += ["", "_`*_net`: the same portfolio after transaction costs (the "
+                  "reference columns are gross)._"]
     if notes:
         lines += ["", "notes:", ""] + [f"- {note}" for note in notes]
     return "\n".join(lines) + "\n"
@@ -355,11 +362,17 @@ def _top_picks(result: ScreenResult, top: int) -> pd.DataFrame:
     return out
 
 
-def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10
+def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10,
+                 view: str = "markdown", on_result: Optional[Callable[[ScreenResult], None]] = None
                  ) -> Tuple[str, Dict[str, object]]:
-    """The daily Markdown briefing across ``specs``: an overview table, one
-    section per preset (membership change, industry mix, top picks) and
-    every data warning.  Returns ``(markdown, data)``.
+    """The daily briefing across ``specs``: an overview, one section per
+    preset (membership change, industry mix, top picks) and every data
+    warning.  Returns ``(document, data)`` — the document in Markdown, or
+    as a self-contained HTML page with ``view="html"``
+    (:mod:`qf_screen.ui.html_report`: SVG charts, sortable and filterable
+    tables, ``+NEW`` / ``-OUT`` badges and rank-move pills); ``data`` is
+    the same JSON-ready dict either way.  ``on_result`` sees every
+    preset's run in order (``report --save-history`` archives them).
 
     The change is measured against the session before the as-of date
     (``engine.diff``); a preset whose diff cannot be formed (no earlier
@@ -370,6 +383,8 @@ def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10
     for spec in specs:
         result = engine.run(spec, asof=asof)
         runs[spec.name] = result
+        if on_result is not None:
+            on_result(result)
         try:
             diffs[spec.name] = engine.diff(spec, asof=result.asof)
         except ValueError:
@@ -378,6 +393,10 @@ def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10
     first = next(iter(runs.values()))
     warnings = list(store.warnings) + sorted(
         {warning for result in runs.values() for warning in result.warnings})
+    data: Dict[str, object] = {
+        "asof": str(first.asof.date()), "warnings": warnings, "presets": {}}
+    if view == "html":
+        return _daily_report_html(engine, specs, runs, diffs, warnings, top), data
     live = f", live row {store.live_date.date()}" if store.live_date is not None else ""
     lines = [f"# qf-screen daily briefing — {first.asof.date()}", "",
              f"_decided on the {first.asof.date()} close · last session "
@@ -386,8 +405,6 @@ def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10
              "", "## Overview", "",
              "| preset | members | entered | exited | retained | top industry |",
              "|---|---|---|---|---|---|"]
-    data: Dict[str, object] = {
-        "asof": str(first.asof.date()), "warnings": warnings, "presets": {}}
     for spec in specs:
         result, diff = runs[spec.name], diffs[spec.name]
         mix = result.industry_mix()
@@ -442,6 +459,40 @@ def daily_report(engine, specs: Sequence[ScreenSpec], asof=None, top: int = 10
     if warnings:
         lines += ["## Data warnings", ""] + [f"- {warning}" for warning in warnings]
     return "\n".join(lines).rstrip() + "\n", data
+
+
+def _daily_report_html(engine, specs: Sequence[ScreenSpec], runs: Dict[str, ScreenResult],
+                       diffs: Dict[str, Optional[ScreenDiff]], warnings: Sequence[str],
+                       top: int) -> str:
+    """The briefing as HTML: the same runs and diffs the Markdown view is
+    built from, handed to :mod:`qf_screen.ui.html_report` as plain data."""
+    from qf_screen.ui.html_report import daily_report_html
+    from qf_screen.presets import preset_origin
+
+    store = engine.store
+    presets = []
+    for spec in specs:
+        result, diff = runs[spec.name], diffs[spec.name]
+        origin = preset_origin(spec.name)
+        presets.append({
+            "name": spec.name, "description": spec.description,
+            # a user preset (one that overrides a built-in included)
+            "user": origin is not None and origin["kind"] != "built-in",
+            "members": len(result.members), "picks": _top_picks(result, top),
+            "mix": result.industry_mix(),
+            "entered": diff.entered if diff is not None else pd.DataFrame(),
+            "exited": diff.exited if diff is not None else pd.DataFrame(),
+            "prev": str(diff.prev.date()) if diff is not None else None,
+            "rank_prev": {symbol: rank + 1 for rank, symbol in enumerate(diff.previous.members)}
+            if diff is not None and diff.ranked else {},
+            "retained": diff.retained if diff is not None else 0,
+            "previous_members": len(diff.previous.members) if diff is not None else 0})
+    context = {
+        "asof": str(next(iter(runs.values())).asof.date()),
+        "last_session": str(store.last_session.date()),
+        "live": str(store.live_date.date()) if store.live_date is not None else None,
+        "loaded": len(store.provenance), "warnings": list(warnings), "presets": presets}
+    return daily_report_html(context)
 
 
 __all__ = [

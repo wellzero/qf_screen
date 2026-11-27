@@ -225,3 +225,30 @@ def store(store_dir):
     from qf_screen.data import CNDataStore
 
     return CNDataStore(store_dir, warmup_rows=SESSIONS)
+
+
+@pytest.fixture(autouse=True)
+def _user_config_isolated(tmp_path, monkeypatch):
+    """The user-level knobs qf_screen reads from the environment -- where
+    user presets are discovered, where snapshots are archived, the webhook
+    the daily commands push to -- never leak into a test run: a developer
+    with ``~/.config/qf_screen/presets/`` must get the same "every preset
+    is a built-in" count as CI, and no test may post anywhere."""
+    monkeypatch.setenv("QF_SCREEN_PRESETS_DIR", str(tmp_path / "presets"))
+    monkeypatch.setenv("QF_SCREEN_HISTORY_DIR", str(tmp_path / "history"))
+    monkeypatch.delenv("QF_SCREEN_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("QF_SCREEN_WEBHOOK_SECRET", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_webhook_network(monkeypatch):
+    """No test may reach the network.  The webhook's one network call
+    (:func:`qf_screen.notify.post`) is replaced by a tripwire; a test that
+    wants a delivered webhook installs its own recorder on top of it."""
+    import qf_screen.notify as notify
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError("qf_screen.notify.post reached for the network inside a test")
+
+    tripwire.original = notify.post         # for the one test of `post` itself
+    monkeypatch.setattr(notify, "post", tripwire)

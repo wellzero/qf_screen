@@ -14,6 +14,15 @@ module gives them a shared, boring cache under
   leave a half-written cache behind;
 * every failure is a silent miss: a cache only ever costs speed.
 
+The cache only ever grows by use, so it has a garbage collector
+(:func:`cache_gc_plan`, behind ``qf-screen cache clear --stale /
+--older-than / --max-gb``): what no run will read again goes (another
+version's layout, an interrupted write, a merged-store cache whose source
+census moved or that is incomplete -- and the derived tables of such a
+window, which are aligned to it), then what has not been used for a
+while, then the least recently used until a budget is met.  The daily
+window's fresh caches are never touched by ``--stale``.
+
 **Layout.**  A wide table is stored as ONE flat parquet column (row-major
 ``date x symbol`` values) with the dates and symbols in the schema
 metadata.  Parquet is column-major and a screener table has ~600 rows and
@@ -272,6 +281,10 @@ _DERIVED_KINDS = frozenset({"feature", "dividend", "alt", "factor"})
 #: window-independent): ``finance_payload_<symbol key>``
 _WINDOW_FREE = re.compile(r"^finance_payload_[0-9a-f]+\.parquet$")
 _STORE_VERSION = re.compile(r"_v(\d+)$")
+#: a merged-store cache directory's name, and the window it serves:
+#: ``store_<window key>_v<version>`` (the key is what ``tables/<window>``
+#: is named after -- the two belong together)
+_STORE_NAME = re.compile(r"^store_(.+)_v\d+$")
 
 #: the ``--live`` akshare cache lives next to the qf_screen cache
 LIVE_DIR = "ak_live"
@@ -376,7 +389,8 @@ def _stat(path: Path):
 def cache_inventory(data_dir, market: str) -> List[Dict[str, object]]:
     """One row per cache entry under ``qf_screen_cache/`` (and the live
     akshare cache beside it): ``kind``, ``name``, ``bytes``, ``files``,
-    ``mtime`` (newest file) and ``age_days``.
+    ``mtime`` (newest file written), ``atime`` (newest file read) and
+    ``age_days`` (since it was written).
 
     A store cache is a DIRECTORY (its 16 wide tables + provenance +
     ``meta.json``); everything else is a table file with its sidecar, the
@@ -385,26 +399,45 @@ def cache_inventory(data_dir, market: str) -> List[Dict[str, object]]:
     """
     entries: Dict[Tuple[str, str], List] = {}
 
-    def _add(kind: str, name: str, size: int, mtime: float) -> None:
-        entry = entries.setdefault((kind, name), [kind, name, 0, 0, 0.0])
+    def _add(kind: str, name: str, size: int, mtime: float, atime: float) -> None:
+        entry = entries.setdefault((kind, name), [kind, name, 0, 0, 0.0, 0.0])
         entry[2] += size
         entry[3] += 1
         entry[4] = max(entry[4], mtime)
+        entry[5] = max(entry[5], atime)
 
     for kind, name, path in _iter_cache(data_dir, market):
         if path.is_dir():                        # a store cache: all one entry
             for inner in sorted(path.iterdir()):
                 if inner.is_file() and (stat := _stat(inner)):
-                    _add(kind, name, stat.st_size, stat.st_mtime)
+                    _add(kind, name, stat.st_size, stat.st_mtime, stat.st_atime)
         elif (stat := _stat(path)) is not None:
-            _add(kind, name, stat.st_size, stat.st_mtime)
+            _add(kind, name, stat.st_size, stat.st_mtime, stat.st_atime)
     rows = []
-    for (kind, name), (_kind, _name, size, files, mtime) in entries.items():
+    for (kind, name), (_kind, _name, size, files, mtime, atime) in entries.items():
         rows.append({
             "kind": kind, "name": name, "bytes": size, "files": files,
             "mtime": pd.Timestamp(mtime, unit="s") if mtime else pd.NaT,
+            "atime": pd.Timestamp(atime, unit="s") if atime else pd.NaT,
             "age_days": round((time.time() - mtime) / 86400.0, 2) if mtime else None})
     return sorted(rows, key=lambda e: (str(e["kind"]), str(e["name"])))
+
+
+def entry_last_use(entry: Dict[str, object]) -> float:
+    """When an entry was last used, in epoch seconds: the newer of its
+    last write and its last read.
+
+    Read times come from the filesystem's ``atime``, which a ``relatime``
+    mount refreshes at most once a day and a ``noatime`` mount never -- so
+    on such a mount "not used for N days" degrades to "not written for N
+    days", which is what the daily window's caches are anyway.
+    """
+    stamps = []
+    for key in ("mtime", "atime"):
+        stamp = entry.get(key)
+        if stamp is not None and not pd.isna(stamp):
+            stamps.append(pd.Timestamp(stamp).timestamp())
+    return max(stamps) if stamps else 0.0
 
 
 def cache_summary(inventory: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -447,34 +480,181 @@ def window_summary(inventory: List[Dict[str, object]]) -> List[Dict[str, object]
     return sorted(rolled.values(), key=lambda r: -int(r["bytes"]))
 
 
-def cache_clear(data_dir, market: str, kinds: Sequence[str]) -> Tuple[int, int]:
-    """Delete the cache entries whose kind is in ``kinds`` (``"all"`` for
-    everything inside the two cache directories, ``tmp`` files included).
-    Returns ``(entries removed, bytes freed)`` — an entry is what
-    :func:`cache_inventory` lists: a table with its sidecar, or a store
-    directory.  Nothing outside ``qf_screen_cache/`` and ``ak_live/`` is
+def _store_state(directory: Path, current: Optional[Tuple[str, str]]) -> Tuple[str, Dict]:
+    """``(verdict, meta)`` of a merged-store cache directory.
+
+    ``broken``: its ``meta.json`` or one of its tables cannot be read, so
+    no run will ever hit it.  ``stale``: built from a source census that
+    is no longer the current one (``current`` is ``(fingerprint, symbol
+    key)`` of the default universe), so the next run of its window
+    rebuilds it in place.  ``fresh``: the census matches.  ``unjudged``:
+    built for another symbol set, or no census to compare with.
+    """
+    try:
+        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "broken", {}
+    if not isinstance(meta, dict) or not meta.get("fingerprint") or not meta.get("calendar") \
+            or not meta.get("symbols"):
+        return "broken", meta if isinstance(meta, dict) else {}
+    if not (directory / "provenance.parquet").exists() or not any(
+            directory.glob("wide_*.parquet")):
+        return "broken", meta
+    match = _STORE_NAME.match(directory.name)
+    if current is None or match is None or match.group(1).rsplit("_", 1)[-1] != current[1]:
+        return "unjudged", meta
+    return ("fresh" if meta.get("fingerprint") == current[0] else "stale"), meta
+
+
+#: why an entry was picked, in the order the collector applies them
+GC_REASONS = ("stale", "old", "lru")
+
+
+def _idle_text(days: float) -> str:
+    """``40 days`` / ``3 hours`` -- an idle time in the unit that reads."""
+    return f"{days:.0f} days" if days >= 1 else f"{days * 24:.0f} hours"
+
+
+def cache_gc_plan(data_dir, market: str, kinds: Optional[Sequence[str]] = None, *,
+                  stale: bool = False, older_than: Optional[float] = None,
+                  max_gb: Optional[float] = None,
+                  current: Optional[Tuple[str, str]] = None,
+                  now: Optional[float] = None) -> Dict[str, object]:
+    """What ``cache clear`` would remove, and why.
+
+    ``kinds`` narrows the candidates (``None`` / ``"all"``: everything in
+    both cache directories).  Three selectors, applied in this order and
+    combined:
+
+    * ``stale`` -- what no run will read again: another version's layout,
+      an interrupted write, a merged-store cache that is broken or was
+      built from a source census that has since moved, and the derived
+      tables of every window all of whose store caches are gone bad (they
+      are aligned to it).  A window's store cache is judged against
+      ``current`` -- ``(fingerprint, symbol key)`` of the default
+      universe, :func:`qf_screen.cache_ops.default_fingerprint`; without
+      it, and for a cache built on another symbol set, nothing is judged
+      and the plan says so.  The fresh daily window is never touched.
+    * ``older_than`` (days) -- entries not used for that long, last use
+      being :func:`entry_last_use`.
+    * ``max_gb`` -- with the above gone, the least recently used entries
+      until what is left fits ``max_gb`` (``1024**3`` bytes, the unit
+      ``cache status`` prints).
+
+    Returns ``{"remove": rows each with a ``reason`` (``stale`` / ``old`` /
+    ``lru``), the ``detail`` behind it and the ``order`` in which the
+    collector picked it (least recently used first, within ``lru``); ``keep``:
+    the rows that stay; ``total_bytes``, ``after_bytes``, ``counts``: entries
+    per reason; ``notes``}.
+    """
+    now = time.time() if now is None else float(now)
+    wanted = None if not kinds or "all" in kinds else set(kinds)
+    inventory = cache_inventory(data_dir, market)
+    scope = [row for row in inventory if wanted is None or row["kind"] in wanted]
+    picked: Dict[Tuple[str, str], Tuple[str, str, int]] = {}
+    notes: List[str] = []
+
+    def pick(row: Dict[str, object], reason: str, detail: str) -> None:
+        key = (str(row["kind"]), str(row["name"]))
+        if key not in picked:                         # the first selector to pick wins
+            picked[key] = (reason, detail, len(picked))
+
+    if stale:
+        for row in scope:
+            if row["kind"] == "obsolete":
+                pick(row, "stale", "an older version's layout -- never read")
+            elif row["kind"] == "tmp":
+                pick(row, "stale", "an interrupted write")
+        judged: Dict[str, List[str]] = {}
+        unjudged = 0
+        for row in inventory:            # every merged-store cache, in scope or not:
+            if row["kind"] not in ("store", "history", "obsolete"):   # a window's state is a fact
+                continue
+            match = _STORE_NAME.match(str(row["name"]))
+            if match is None:
+                continue
+            verdict, _meta = _store_state(cache_dir_for(data_dir, market) / str(row["name"]),
+                                          current)
+            judged.setdefault(match.group(1), []).append(verdict)
+            if row not in scope:
+                continue
+            if verdict == "stale":
+                pick(row, "stale", "a source file changed since it was built")
+            elif verdict == "broken":
+                pick(row, "stale", "incomplete -- its meta or wide tables are missing")
+            elif verdict == "unjudged":
+                unjudged += 1
+        # a window whose every store cache is gone bad: its tables are aligned to it
+        gone = {window for window, verdicts in judged.items()
+                if all(verdict in ("stale", "broken") for verdict in verdicts)}
+        for row in scope:
+            window = str(row["name"]).split("/", 1)[0] if "/" in str(row["name"]) else None
+            if window in gone:
+                pick(row, "stale", "its window's store cache is stale")
+        if current is None:
+            notes.append("no current source census: merged-store caches were not judged "
+                         "(only other versions' layouts, interrupted writes and incomplete "
+                         "caches go)")
+        elif unjudged:
+            notes.append(f"{unjudged} merged-store cache(s) were built for another symbol set "
+                         "and were not judged")
+    if older_than is not None:
+        for row in scope:
+            idle = (now - entry_last_use(row)) / 86400.0
+            if idle > float(older_than):
+                pick(row, "old", f"not used for {_idle_text(idle)}")
+    total = sum(int(row["bytes"]) for row in scope)
+    after = total - sum(int(row["bytes"]) for row in scope
+                        if (str(row["kind"]), str(row["name"])) in picked)
+    if max_gb is not None:
+        budget = float(max_gb) * 1024 ** 3
+        if after > budget:
+            rest = sorted((row for row in scope
+                           if (str(row["kind"]), str(row["name"])) not in picked),
+                          key=entry_last_use)
+            for row in rest:
+                if after <= budget:
+                    break
+                pick(row, "lru", f"least recently used (to fit {max_gb:g} GB)")
+                after -= int(row["bytes"])
+    remove, keep = [], []
+    for row in scope:
+        why = picked.get((str(row["kind"]), str(row["name"])))
+        if why:
+            remove.append({**row, "reason": why[0], "detail": why[1], "order": why[2]})
+        else:
+            keep.append(row)
+    remove.sort(key=lambda row: (GC_REASONS.index(row["reason"]), str(row["kind"]),
+                                 str(row["name"])))
+    counts = {reason: sum(1 for row in remove if row["reason"] == reason)
+              for reason in GC_REASONS}
+    return {"remove": remove, "keep": keep, "total_bytes": total, "after_bytes": after,
+            "counts": counts, "notes": notes}
+
+
+def cache_remove(data_dir, market: str, targets: Sequence[Tuple[str, str]]) -> Tuple[int, int]:
+    """Delete the listed cache entries (``(kind, name)`` as
+    :func:`cache_inventory` names them).  Returns ``(entries removed, bytes
+    freed)``.  Nothing outside ``qf_screen_cache/`` and ``ak_live/`` is
     ever touched; a window left without tables is removed with it."""
-    wanted = set(kinds)
-    everything = "all" in wanted
+    wanted = {(str(kind), str(name)) for kind, name in targets}
     entries: set = set()
     freed = 0
     for kind, name, path in _iter_cache(data_dir, market):
-        if not (everything or kind in wanted):
+        if (kind, name) not in wanted:
             continue
         try:
             if path.is_dir():                    # a store cache: all or nothing
-                size = 0
                 for inner in path.iterdir():
                     if inner.is_file():
-                        size += inner.stat().st_size
+                        freed += inner.stat().st_size
                         inner.unlink()
                 path.rmdir()
                 entries.add(name)
             else:
-                size = path.stat().st_size
+                freed += path.stat().st_size
                 path.unlink()
                 entries.add(f"{kind}:{name}")
-            freed += size
         except OSError as exc:
             logger.warning("cache clear: %s not removed (%s)", path.name, exc)
     tables = cache_dir_for(data_dir, market) / TABLES_DIR
@@ -489,9 +669,23 @@ def cache_clear(data_dir, market: str, kinds: Sequence[str]) -> Tuple[int, int]:
     return len(entries), freed
 
 
+def cache_clear(data_dir, market: str, kinds: Sequence[str]) -> Tuple[int, int]:
+    """Delete the cache entries whose kind is in ``kinds`` (``"all"`` for
+    everything inside the two cache directories, ``tmp`` files included).
+    Returns ``(entries removed, bytes freed)`` -- an entry is what
+    :func:`cache_inventory` lists: a table with its sidecar, or a store
+    directory.  To prune instead of clearing by kind, plan with
+    :func:`cache_gc_plan` and remove with :func:`cache_remove`."""
+    everything = "all" in set(kinds)
+    targets = [(str(row["kind"]), str(row["name"])) for row in cache_inventory(data_dir, market)
+               if everything or row["kind"] in kinds]
+    return cache_remove(data_dir, market, targets)
+
+
 __all__ = [
-    "KINDS", "KIND_LABELS", "LIVE_DIR", "TABLES_DIR", "cache_clear", "cache_dir_for",
-    "cache_inventory", "cache_summary", "cached_wide_table", "derived_fingerprint",
-    "fingerprint", "kind_of", "live_cache_dir", "read_cached_table", "read_wide",
-    "window_summary", "write_cached_table", "write_wide",
+    "GC_REASONS", "KINDS", "KIND_LABELS", "LIVE_DIR", "TABLES_DIR", "cache_clear",
+    "cache_dir_for", "cache_gc_plan", "cache_inventory", "cache_remove", "cache_summary",
+    "cached_wide_table", "derived_fingerprint", "entry_last_use", "fingerprint", "kind_of",
+    "live_cache_dir", "read_cached_table", "read_wide", "window_summary", "write_cached_table",
+    "write_wide",
 ]

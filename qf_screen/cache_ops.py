@@ -1,6 +1,6 @@
-"""``qf-screen cache``: what the caches hold, how fresh they are, and how
-to pre-warm them after a data pull.  Everything here is safe to run at any
-time — the caches only ever cost speed.
+"""``qf-screen cache``: what the caches hold, how fresh they are, how to
+pre-warm them after a data pull, and how to prune them.  Everything here
+is safe to run at any time — the caches only ever cost speed.
 """
 from __future__ import annotations
 
@@ -43,10 +43,10 @@ def cache_status(data_dir, market: str = "cn", check_fresh: bool = True) -> Dict
     store window (the derived tables), plus one row per merged-store cache
     with what it covers.
 
-    ``fresh`` on a daily-store row is ``True`` / ``False`` when its
-    fingerprint can be compared with the default universe's (same symbol
-    list) and ``None`` when the cache was built for another symbol set or
-    the check is off; a history-window cache is never judged.
+    ``fresh`` on a merged-store row (the daily window or a validation
+    one) is ``True`` / ``False`` when its fingerprint can be compared with
+    the default universe's (same symbol list) and ``None`` when the cache
+    was built for another symbol set or the check is off.
     """
     inventory = cache_inventory(data_dir, market)
     fingerprint = symbol_key = None
@@ -75,7 +75,7 @@ def cache_status(data_dir, market: str = "cn", check_fresh: bool = True) -> Dict
             "sessions": len(calendar),
             "window": f"{calendar[0]}..{calendar[-1]}" if calendar else None,
             "fingerprint": meta.get("fingerprint")})
-        if entry["kind"] == "store" and match and fingerprint is not None:
+        if entry["kind"] in ("store", "history") and match and fingerprint is not None:
             if match.group(4) == symbol_key:
                 row["fresh"] = meta.get("fingerprint") == fingerprint
             else:
@@ -134,4 +134,34 @@ def cache_warm(data_dir=None, market: str = "cn", presets: Optional[Sequence[str
             "presets": warmed, "seconds": timings}
 
 
-__all__ = ["cache_status", "cache_warm", "default_fingerprint"]
+def cache_prune(data_dir, market: str = "cn", kinds: Optional[Sequence[str]] = None,
+                stale: bool = False, older_than: Optional[float] = None,
+                max_gb: Optional[float] = None, dry_run: bool = False) -> Dict[str, object]:
+    """Plan a pruning (and run it unless ``dry_run``): what
+    :func:`qf_screen.data.table_cache.cache_gc_plan` picks, then what
+    :func:`~qf_screen.data.table_cache.cache_remove` took.
+
+    ``stale`` needs the default universe's current source census to judge
+    the merged-store caches with; when it cannot be had (no store at
+    ``data_dir``) the plan goes ahead without judging them and says so.
+    """
+    from qf_screen.data.table_cache import cache_gc_plan, cache_remove, cache_dir_for
+
+    current = None
+    if stale:
+        try:
+            current = default_fingerprint(data_dir, market)
+        except Exception as exc:                          # noqa: BLE001 - judge what we can
+            logger.warning("cache prune: no current source census (%s) -- merged-store "
+                           "caches are not judged", exc)
+    plan = cache_gc_plan(data_dir, market, kinds, stale=stale, older_than=older_than,
+                         max_gb=max_gb, current=current)
+    removed = freed = 0
+    if not dry_run and plan["remove"]:
+        removed, freed = cache_remove(data_dir, market,
+                                      [(row["kind"], row["name"]) for row in plan["remove"]])
+    return {**plan, "removed": removed, "freed": freed,
+            "cache_dir": str(cache_dir_for(data_dir, market))}
+
+
+__all__ = ["cache_prune", "cache_status", "cache_warm", "default_fingerprint"]

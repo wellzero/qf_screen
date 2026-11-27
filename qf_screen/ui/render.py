@@ -90,6 +90,11 @@ def _cell(value, name) -> str:
     return str(value)
 
 
+#: the public name of the cell formatter (the HTML report builds its
+#: table cells with it too)
+cell_text = _cell
+
+
 def fmt_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """Result table with unit-aware cell formatting (numeric and
     all-NaN-object columns alike — an all-NaN pandas column arrives as
@@ -170,6 +175,6 @@ def industry_line(mix: pd.Series, top: int = 5) -> str:
 
 
 __all__ = [
-    "fmt_frame", "fmt_value", "frame_text", "human_bytes", "industry_line",
+    "cell_text", "fmt_frame", "fmt_value", "frame_text", "human_bytes", "industry_line",
     "markdown_table", "num", "pct",
 ]
